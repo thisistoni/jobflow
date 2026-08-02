@@ -8,7 +8,8 @@ from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 
 from .database import connect, decode_json, encode_json, init_db, utc_now
-from .models import ActivityItem, FeedbackIn, FeedbackOut, JobDetail, JobListItem, Preferences
+from .importer import _stable_id, canonicalize_url
+from .models import ActivityItem, FeedbackIn, FeedbackOut, JobAnalysisIn, JobDetail, JobIngestIn, JobListItem, Preferences
 
 
 
@@ -35,7 +36,7 @@ def health() -> dict[str, str]:
 
 @app.get("/api/jobs", response_model=list[JobListItem])
 def list_jobs(
-    filter: Literal["inbox", "strong", "maybe", "low", "reviewed", "all"] = "inbox",
+    filter: Literal["inbox", "strong", "maybe", "low", "reviewed", "unanalyzed", "all"] = "inbox",
     limit: int = Query(50, ge=1, le=200),
 ) -> list[JobListItem]:
     clauses: list[str] = []
@@ -50,6 +51,8 @@ def list_jobs(
         clauses.append("j.status = 'inbox' AND (j.verdict = 'reject' OR j.score < 55)")
     elif filter == "reviewed":
         clauses.append("j.status != 'inbox'")
+    elif filter == "unanalyzed":
+        clauses.append("j.status = 'inbox' AND j.score IS NULL")
     where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
     params.append(limit)
     with connect() as db:
@@ -65,6 +68,85 @@ def list_jobs(
             params,
         ).fetchall()
     return [_job_list_item(row) for row in rows]
+
+
+@app.post("/api/jobs", response_model=JobDetail)
+def ingest_job(payload: JobIngestIn) -> JobDetail:
+    try:
+        source_url = canonicalize_url(payload.source_url)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    job_id = _stable_id(source_url)
+    now = utc_now()
+    first_seen_at = payload.first_seen_at or now
+    with connect() as db:
+        existing = db.execute(
+            """
+            SELECT j.*, f.rating, f.reasons_json, f.note, f.updated_at AS feedback_updated_at
+            FROM jobs j
+            LEFT JOIN feedback f ON f.job_id = j.id
+            WHERE j.source_url = ?
+            """,
+            (source_url,),
+        ).fetchone()
+        if existing is not None:
+            return _job_detail(existing)
+        db.execute(
+            """
+            INSERT INTO jobs (
+                id, source_name, source_url, title, company, location,
+                raw_description, extracted_description, status, fit_evidence_json,
+                source_evidence_json, missing_info_json, hard_gate_reasons_json,
+                requirements_json, responsibilities_json, technologies_json,
+                first_seen_at, updated_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'inbox', ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                job_id,
+                payload.source_name,
+                source_url,
+                payload.title,
+                payload.company,
+                payload.location,
+                payload.raw_description,
+                payload.extracted_description,
+                encode_json({}),
+                encode_json({}),
+                encode_json([]),
+                encode_json([]),
+                encode_json([]),
+                encode_json([]),
+                encode_json([]),
+                first_seen_at,
+                now,
+            ),
+        )
+        db.execute(
+            """
+            INSERT INTO activity (id, kind, title, body, job_id, created_at)
+            VALUES (?, 'ingest', ?, ?, ?, ?)
+            """,
+            (
+                str(uuid.uuid4()),
+                f"Added {payload.company}",
+                payload.title,
+                job_id,
+                now,
+            ),
+        )
+        row = db.execute(
+            """
+            SELECT j.*, f.rating, f.reasons_json, f.note, f.updated_at AS feedback_updated_at
+            FROM jobs j
+            LEFT JOIN feedback f ON f.job_id = j.id
+            WHERE j.id = ?
+            """,
+            (job_id,),
+        ).fetchone()
+    if row is None:
+        raise HTTPException(status_code=500, detail="Job was not created")
+    return _job_detail(row)
 
 
 @app.get("/api/jobs/{job_id}", response_model=JobDetail)
@@ -83,6 +165,88 @@ def get_job(job_id: str) -> JobDetail:
         raise HTTPException(status_code=404, detail="Job not found")
     item = _job_detail(row)
     return item
+
+
+@app.put("/api/jobs/{job_id}/analysis", response_model=JobDetail)
+def update_job_analysis(job_id: str, payload: JobAnalysisIn) -> JobDetail:
+    now = utc_now()
+    analysis = payload.model_dump()
+    with connect() as db:
+        job = db.execute("SELECT title, company FROM jobs WHERE id = ?", (job_id,)).fetchone()
+        if job is None:
+            raise HTTPException(status_code=404, detail="Job not found")
+        db.execute(
+            """
+            UPDATE jobs SET
+                score = ?,
+                verdict = ?,
+                confidence = ?,
+                summary = ?,
+                salary_display = ?,
+                salary_min_annual = ?,
+                salary_max_annual = ?,
+                salary_currency = ?,
+                work_mode = ?,
+                home_office_days = ?,
+                language_environment = ?,
+                fit_evidence_json = ?,
+                source_evidence_json = ?,
+                missing_info_json = ?,
+                hard_gate_reasons_json = ?,
+                requirements_json = ?,
+                responsibilities_json = ?,
+                technologies_json = ?,
+                updated_at = ?
+            WHERE id = ?
+            """,
+            (
+                payload.score,
+                payload.verdict,
+                payload.confidence,
+                payload.summary,
+                payload.salary_display,
+                payload.salary_min_annual,
+                payload.salary_max_annual,
+                payload.salary_currency,
+                payload.work_mode,
+                payload.home_office_days,
+                payload.language_environment,
+                encode_json(analysis["fit_evidence"]),
+                encode_json(analysis["source_evidence"]),
+                encode_json(analysis["missing_info"]),
+                encode_json(analysis["hard_gate_reasons"]),
+                encode_json(analysis["requirements"]),
+                encode_json(analysis["responsibilities"]),
+                encode_json(analysis["technologies"]),
+                now,
+                job_id,
+            ),
+        )
+        db.execute(
+            """
+            INSERT INTO activity (id, kind, title, body, job_id, created_at)
+            VALUES (?, 'analysis', ?, ?, ?, ?)
+            """,
+            (
+                str(uuid.uuid4()),
+                f"Analyzed {job['company']}",
+                f"{job['title']} · {payload.score}% · {payload.verdict}",
+                job_id,
+                now,
+            ),
+        )
+        row = db.execute(
+            """
+            SELECT j.*, f.rating, f.reasons_json, f.note, f.updated_at AS feedback_updated_at
+            FROM jobs j
+            LEFT JOIN feedback f ON f.job_id = j.id
+            WHERE j.id = ?
+            """,
+            (job_id,),
+        ).fetchone()
+    if row is None:
+        raise HTTPException(status_code=404, detail="Job not found")
+    return _job_detail(row)
 
 
 @app.post("/api/jobs/{job_id}/feedback", response_model=FeedbackOut)
@@ -246,6 +410,9 @@ def _job_detail(row: Any) -> JobDetail:
     base = _job_list_item(row).model_dump()
     return JobDetail(
         **base,
+        source_name=row["source_name"],
+        raw_description=row["raw_description"],
+        extracted_description=row["extracted_description"],
         fit_evidence=decode_json(row["fit_evidence_json"], {}),
         source_evidence=decode_json(row["source_evidence_json"], {}),
         hard_gate_reasons=decode_json(row["hard_gate_reasons_json"], []),
@@ -253,6 +420,8 @@ def _job_detail(row: Any) -> JobDetail:
         responsibilities=decode_json(row["responsibilities_json"], []),
         technologies=decode_json(row["technologies_json"], []),
         salary_min_annual=row["salary_min_annual"],
+        salary_max_annual=row["salary_max_annual"],
+        salary_currency=row["salary_currency"],
         home_office_days=row["home_office_days"],
         language_environment=row["language_environment"],
         imported_state=row["imported_state"],

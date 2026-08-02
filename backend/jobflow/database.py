@@ -55,10 +55,13 @@ def init_db(path: str | Path | None = None) -> None:
             CREATE TABLE IF NOT EXISTS jobs (
                 id TEXT PRIMARY KEY,
                 source_id TEXT,
+                source_name TEXT,
                 source_url TEXT NOT NULL UNIQUE,
                 title TEXT NOT NULL,
                 company TEXT NOT NULL,
                 location TEXT,
+                raw_description TEXT,
+                extracted_description TEXT,
                 score INTEGER,
                 verdict TEXT,
                 confidence TEXT,
@@ -67,6 +70,8 @@ def init_db(path: str | Path | None = None) -> None:
                 summary TEXT,
                 salary_display TEXT,
                 salary_min_annual INTEGER,
+                salary_max_annual INTEGER,
+                salary_currency TEXT,
                 work_mode TEXT,
                 home_office_days INTEGER,
                 language_environment TEXT,
@@ -121,6 +126,17 @@ def init_db(path: str | Path | None = None) -> None:
             );
             """
         )
+        _ensure_column(db, "jobs", "source_name", "TEXT")
+        _ensure_column(db, "jobs", "raw_description", "TEXT")
+        _ensure_column(db, "jobs", "extracted_description", "TEXT")
+        _ensure_column(db, "jobs", "salary_max_annual", "INTEGER")
+        _ensure_column(db, "jobs", "salary_currency", "TEXT")
+
+
+def _ensure_column(db: sqlite3.Connection, table: str, column: str, definition: str) -> None:
+    columns = {row["name"] for row in db.execute(f"PRAGMA table_info({table})").fetchall()}
+    if column not in columns:
+        db.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
 
 
 def rows_to_list(rows: list[sqlite3.Row]) -> list[dict[str, Any]]:

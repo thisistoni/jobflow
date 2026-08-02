@@ -4,6 +4,7 @@ dist/
 __pycache__/
 .pytest_cache/
 *.pyc
+*.egg-info/
 *.tsbuildinfo
 frontend/vite.config.js
 frontend/vite.config.d.ts
