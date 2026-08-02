@@ -10,6 +10,7 @@ services:
       JOBFLOW_AUTH_COOKIE_SECURE: "${JOBFLOW_AUTH_COOKIE_SECURE:-false}"
       FIRECRAWL_API_URL: "${FIRECRAWL_API_URL:-}"
       FIRECRAWL_API_KEY: "${FIRECRAWL_API_KEY:-}"
+      JOBFLOW_SECRET_KEY: "${JOBFLOW_SECRET_KEY:-}"
     volumes:
       - jobflow-data:/data
 

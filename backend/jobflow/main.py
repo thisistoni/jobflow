@@ -19,7 +19,7 @@ from zoneinfo import ZoneInfo
 
 from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
@@ -48,6 +48,21 @@ from .models import (
     JobIngestIn,
     JobListItem,
     Preferences,
+    ReactiveResumeConnectIn,
+    ReactiveResumeOption,
+    ReactiveResumeReference,
+    ReactiveResumeReferenceIn,
+    ReactiveResumeStatus,
+)
+from .reactive_resume import (
+    DEFAULT_BASE_URL as REACTIVE_RESUME_DEFAULT_BASE_URL,
+    ReactiveResumeClient,
+    ReactiveResumeError,
+    SecretStoreError,
+    decrypt_api_key,
+    encrypt_api_key,
+    encryption_ready,
+    validate_base_url,
 )
 
 
@@ -595,6 +610,250 @@ def dashboard_pulse(days: int = Query(20, ge=7, le=31)) -> DashboardPulseOut:
             counts[local_day] += 1
     pulse_days = [DailyPulseItem(date=day.isoformat(), count=count) for day, count in counts.items()]
     return DashboardPulseOut(days=pulse_days, today_count=counts[today])
+
+
+@app.get("/api/integrations/reactive-resume", response_model=ReactiveResumeStatus)
+def reactive_resume_status() -> ReactiveResumeStatus:
+    return _reactive_resume_status()
+
+
+@app.post("/api/integrations/reactive-resume/connect", response_model=ReactiveResumeStatus)
+def reactive_resume_connect(payload: ReactiveResumeConnectIn) -> ReactiveResumeStatus:
+    if not encryption_ready():
+        raise HTTPException(status_code=503, detail="Encrypted secret storage is not configured")
+    try:
+        base_url = validate_base_url(payload.base_url)
+        api_key = payload.api_key.get_secret_value()
+        client = ReactiveResumeClient(api_key, base_url)
+        resumes = client.list_resumes()
+        options = _reactive_resume_options(resumes)
+        canonical = [row for row in resumes if row.get("name") == "Hermes Canonical Base CV"]
+        reference = _reactive_resume_reference(client.get_resume(str(canonical[0]["id"]))) if len(canonical) == 1 else None
+        encrypted = encrypt_api_key(api_key)
+    except (ValueError, ReactiveResumeError, SecretStoreError, KeyError) as exc:
+        _record_reactive_resume_error(str(exc))
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+    now = utc_now()
+    with connect() as db:
+        db.execute(
+            """
+            UPDATE reactive_resume_config
+            SET base_url = ?, encrypted_api_key = ?, configured_at = ?, verified_at = ?,
+                last_error = NULL, reference_resume_id = ?, reference_resume_name = ?,
+                reference_template = ?, reference_updated_at = ?, resumes_json = ?, updated_at = ?
+            WHERE id = 1
+            """,
+            (
+                base_url,
+                encrypted,
+                now,
+                now,
+                reference.id if reference else None,
+                reference.name if reference else None,
+                reference.template if reference else None,
+                reference.updated_at if reference else None,
+                encode_json([option.model_dump() for option in options]),
+                now,
+            ),
+        )
+        db.execute(
+            "INSERT INTO activity(id, kind, title, body, job_id, created_at) VALUES (?, ?, ?, ?, NULL, ?)",
+            (str(uuid.uuid4()), "integration", "Reactive Resume connected", "Reference CV connection verified", now),
+        )
+    return _reactive_resume_status()
+
+
+@app.post("/api/integrations/reactive-resume/refresh", response_model=ReactiveResumeStatus)
+def reactive_resume_refresh() -> ReactiveResumeStatus:
+    row, client = _configured_reactive_resume_client()
+    try:
+        resumes = client.list_resumes()
+        options = _reactive_resume_options(resumes)
+        reference_id = row["reference_resume_id"]
+        reference = None
+        if reference_id:
+            if not any(str(item.get("id", "")) == reference_id for item in resumes):
+                raise ReactiveResumeError("Selected reference CV no longer exists")
+            reference = _reactive_resume_reference(client.get_resume(reference_id))
+    except ReactiveResumeError as exc:
+        _record_reactive_resume_error(str(exc))
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+    now = utc_now()
+    with connect() as db:
+        db.execute(
+            """
+            UPDATE reactive_resume_config
+            SET verified_at = ?, last_error = NULL, reference_resume_name = ?, reference_template = ?,
+                reference_updated_at = ?, resumes_json = ?, updated_at = ?
+            WHERE id = 1
+            """,
+            (
+                now,
+                reference.name if reference else None,
+                reference.template if reference else None,
+                reference.updated_at if reference else None,
+                encode_json([option.model_dump() for option in options]),
+                now,
+            ),
+        )
+    return _reactive_resume_status()
+
+
+@app.put("/api/integrations/reactive-resume/reference", response_model=ReactiveResumeStatus)
+def reactive_resume_select_reference(payload: ReactiveResumeReferenceIn) -> ReactiveResumeStatus:
+    _, client = _configured_reactive_resume_client()
+    try:
+        resumes = client.list_resumes()
+    except ReactiveResumeError as exc:
+        _record_reactive_resume_error(str(exc))
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+    selected = next((row for row in resumes if str(row.get("id", "")) == payload.resume_id), None)
+    if selected is None:
+        raise HTTPException(status_code=422, detail="Selected Reactive Resume CV was not found")
+    if selected.get("name") == "Hermes Starting Template":
+        raise HTTPException(
+            status_code=422,
+            detail="Hermes Starting Template is historical and cannot be the tailoring reference",
+        )
+    try:
+        reference = _reactive_resume_reference(client.get_resume(payload.resume_id))
+    except ReactiveResumeError as exc:
+        _record_reactive_resume_error(str(exc))
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+    now = utc_now()
+    with connect() as db:
+        db.execute(
+            """
+            UPDATE reactive_resume_config
+            SET reference_resume_id = ?, reference_resume_name = ?, reference_template = ?,
+                reference_updated_at = ?, verified_at = ?, last_error = NULL, updated_at = ?
+            WHERE id = 1
+            """,
+            (reference.id, reference.name, reference.template, reference.updated_at, now, now),
+        )
+    return _reactive_resume_status()
+
+
+@app.delete("/api/integrations/reactive-resume", response_model=ReactiveResumeStatus)
+def reactive_resume_disconnect() -> ReactiveResumeStatus:
+    now = utc_now()
+    with connect() as db:
+        db.execute(
+            """
+            UPDATE reactive_resume_config
+            SET base_url = ?, encrypted_api_key = NULL, configured_at = NULL, verified_at = NULL,
+                last_error = NULL, reference_resume_id = NULL, reference_resume_name = NULL,
+                reference_template = NULL, reference_updated_at = NULL, resumes_json = '[]', updated_at = ?
+            WHERE id = 1
+            """,
+            (REACTIVE_RESUME_DEFAULT_BASE_URL, now),
+        )
+    return _reactive_resume_status()
+
+
+@app.get("/api/integrations/reactive-resume/reference.pdf")
+def reactive_resume_reference_pdf(download: bool = False) -> Response:
+    row, client = _configured_reactive_resume_client()
+    resume_id = row["reference_resume_id"]
+    if not resume_id:
+        raise HTTPException(status_code=404, detail="No Reactive Resume reference CV is selected")
+    try:
+        pdf = client.export_pdf(resume_id)
+    except ReactiveResumeError as exc:
+        _record_reactive_resume_error(str(exc))
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+    disposition = "attachment" if download else "inline"
+    return Response(
+        content=pdf,
+        media_type="application/pdf",
+        headers={
+            "Cache-Control": "private, no-store",
+            "Content-Disposition": f'{disposition}; filename="jobflow-reference-cv.pdf"',
+        },
+    )
+
+
+def _reactive_resume_status() -> ReactiveResumeStatus:
+    with connect() as db:
+        row = db.execute("SELECT * FROM reactive_resume_config WHERE id = 1").fetchone()
+    configured = bool(row["encrypted_api_key"])
+    reference = None
+    if row["reference_resume_id"] and row["reference_resume_name"]:
+        reference = ReactiveResumeReference(
+            id=row["reference_resume_id"],
+            name=row["reference_resume_name"],
+            template=row["reference_template"],
+            updated_at=row["reference_updated_at"],
+        )
+    options = [ReactiveResumeOption.model_validate(item) for item in decode_json(row["resumes_json"], [])]
+    ready = encryption_ready()
+    return ReactiveResumeStatus(
+        encryption_ready=ready,
+        configured=configured,
+        verified=bool(configured and ready and row["verified_at"] and not row["last_error"]),
+        base_url=row["base_url"],
+        configured_at=row["configured_at"],
+        last_verified_at=row["verified_at"],
+        last_error=row["last_error"],
+        reference=reference,
+        available_resumes=options,
+    )
+
+
+def _configured_reactive_resume_client() -> tuple[Any, ReactiveResumeClient]:
+    with connect() as db:
+        row = db.execute("SELECT * FROM reactive_resume_config WHERE id = 1").fetchone()
+    if not row["encrypted_api_key"]:
+        raise HTTPException(status_code=409, detail="Reactive Resume is not connected")
+    if not encryption_ready():
+        raise HTTPException(status_code=503, detail="Encrypted secret storage is unavailable")
+    try:
+        api_key = decrypt_api_key(row["encrypted_api_key"])
+        client = ReactiveResumeClient(api_key, row["base_url"])
+    except (SecretStoreError, ValueError) as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    return row, client
+
+
+def _reactive_resume_options(resumes: list[dict[str, Any]]) -> list[ReactiveResumeOption]:
+    options: list[ReactiveResumeOption] = []
+    for row in resumes:
+        resume_id = str(row.get("id", "")).strip()
+        name = str(row.get("name", "")).strip()
+        if not resume_id or not name:
+            continue
+        options.append(
+            ReactiveResumeOption(
+                id=resume_id,
+                name=name,
+                updated_at=str(row.get("updatedAt")) if row.get("updatedAt") else None,
+                historical_source=name == "Hermes Starting Template",
+            )
+        )
+    return sorted(options, key=lambda option: option.name.casefold())
+
+
+def _reactive_resume_reference(detail: dict[str, Any]) -> ReactiveResumeReference:
+    resume_id = str(detail.get("id", "")).strip()
+    name = str(detail.get("name", "")).strip()
+    if not resume_id or not name:
+        raise ReactiveResumeError("Reactive Resume detail is missing reference metadata")
+    raw_data = detail.get("data")
+    data: dict[str, Any] = raw_data if isinstance(raw_data, dict) else {}
+    raw_metadata = data.get("metadata")
+    metadata: dict[str, Any] = raw_metadata if isinstance(raw_metadata, dict) else {}
+    template = str(metadata.get("template")) if metadata.get("template") else None
+    updated_at = str(detail.get("updatedAt")) if detail.get("updatedAt") else None
+    return ReactiveResumeReference(id=resume_id, name=name, template=template, updated_at=updated_at)
+
+
+def _record_reactive_resume_error(message: str) -> None:
+    safe = message[:300]
+    with connect() as db:
+        db.execute(
+            "UPDATE reactive_resume_config SET last_error = ?, updated_at = ? WHERE id = 1",
+            (safe, utc_now()),
+        )
 
 
 def _discovery_operations() -> DiscoveryOperationsOut:

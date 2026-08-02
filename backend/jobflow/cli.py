@@ -85,6 +85,13 @@ def build_parser() -> argparse.ArgumentParser:
 
     activity = commands.add_parser("activity", help="Read recent deterministic activity.")
     activity.add_argument("--limit", type=int, default=50)
+
+    resume = commands.add_parser("reactive-resume", help="Inspect the app-owned Reactive Resume connection.")
+    resume_commands = resume.add_subparsers(dest="resume_command", required=True)
+    resume_commands.add_parser("status", help="Read connection and reference-CV metadata without credentials.")
+    resume_commands.add_parser("refresh", help="Refresh connection and selected reference metadata.")
+    select_reference = resume_commands.add_parser("select", help="Select a non-historical reference CV by ID.")
+    select_reference.add_argument("resume_id")
     return parser
 
 
@@ -122,6 +129,17 @@ def dispatch(args: argparse.Namespace, client: "Client") -> Any:
     if args.command == "activity":
         query = urlencode({"limit": args.limit})
         return client.request("GET", f"/api/activity?{query}")
+    if args.command == "reactive-resume":
+        if args.resume_command == "status":
+            return client.request("GET", "/api/integrations/reactive-resume")
+        if args.resume_command == "refresh":
+            return client.request("POST", "/api/integrations/reactive-resume/refresh")
+        if args.resume_command == "select":
+            return client.request(
+                "PUT",
+                "/api/integrations/reactive-resume/reference",
+                {"resume_id": args.resume_id},
+            )
     raise CliError("Unsupported command")
 
 

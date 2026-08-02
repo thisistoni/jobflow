@@ -1689,6 +1689,179 @@ textarea {
 .run-state.failed { background: #b93a23; }
 .run-state.running { background: var(--orange); }
 
+.reactive-resume-panel {
+  display: grid;
+  gap: 12px;
+}
+
+.integration-heading,
+.reference-actions,
+.integration-secondary-actions {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.integration-heading h2 {
+  margin-top: 2px;
+}
+
+.integration-state {
+  padding: 5px 8px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  color: var(--muted);
+  font-size: 8px;
+  font-weight: 900;
+}
+
+.integration-state.ready {
+  border-color: #2c7a4b;
+  color: #2c7a4b;
+}
+
+.integration-connect,
+.integration-ready {
+  display: grid;
+  gap: 10px;
+}
+
+.integration-connect > p,
+.immutable-note {
+  color: var(--dim);
+  font-size: 9px;
+  line-height: 13px;
+}
+
+.integration-connect label,
+.reference-select {
+  display: grid;
+  gap: 5px;
+}
+
+.integration-connect label > span,
+.reference-select > span {
+  font-size: 8px;
+  font-weight: 900;
+}
+
+.integration-connect input,
+.reference-select select {
+  width: 100%;
+  min-width: 0;
+  min-height: 40px;
+  padding: 9px 10px;
+  border: 1px solid var(--line);
+  border-radius: 5px;
+  background: var(--paper);
+  color: var(--ink);
+  font: inherit;
+  font-size: 10px;
+}
+
+.integration-primary,
+.integration-secondary-actions button,
+.reference-actions a {
+  min-height: 40px;
+  border: 0;
+  border-radius: 999px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  font-size: 8px;
+  font-weight: 900;
+  text-decoration: none;
+  cursor: pointer;
+}
+
+.integration-primary {
+  background: var(--orange);
+  color: #fff;
+}
+
+.integration-primary:disabled,
+.integration-secondary-actions button:disabled {
+  opacity: 0.55;
+  cursor: wait;
+}
+
+.integration-warning,
+.integration-error {
+  padding: 9px;
+  border: 1px solid #df8b79;
+  border-radius: 5px;
+  background: #fff3ed;
+  color: #8a3105;
+  font-size: 9px;
+  line-height: 13px;
+}
+
+.integration-warning {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+}
+
+.reference-card {
+  min-width: 0;
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  align-items: center;
+  gap: 10px;
+  padding: 11px;
+  border: 1px solid var(--ink);
+  border-radius: 6px;
+  background: #fffaf6;
+}
+
+.reference-icon {
+  width: 38px;
+  height: 38px;
+  border-radius: 50%;
+  display: grid;
+  place-items: center;
+  background: var(--ink);
+  color: white;
+}
+
+.reference-card > span:last-child {
+  min-width: 0;
+  display: grid;
+  gap: 2px;
+}
+
+.reference-card small,
+.reference-card em {
+  color: var(--dim);
+  font-size: 8px;
+  font-style: normal;
+}
+
+.reference-card b {
+  overflow-wrap: anywhere;
+  font-size: 11px;
+}
+
+.reference-actions a {
+  flex: 1;
+  background: var(--orange);
+  color: white;
+}
+
+.reference-actions a:last-child {
+  background: var(--ink);
+}
+
+.integration-secondary-actions button {
+  min-height: 36px;
+  padding: 0 12px;
+  border: 1px solid var(--line);
+  background: transparent;
+  color: var(--muted);
+}
+
 .learning-note {
   min-height: 42px;
   padding: 7px;

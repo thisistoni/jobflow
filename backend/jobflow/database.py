@@ -166,6 +166,24 @@ def init_db(path: str | Path | None = None) -> None:
                 matched_queries_json TEXT NOT NULL DEFAULT '[]',
                 PRIMARY KEY (run_id, url)
             );
+
+            CREATE INDEX IF NOT EXISTS idx_discovery_candidates_run
+            ON discovery_candidates(run_id);
+
+            CREATE TABLE IF NOT EXISTS reactive_resume_config (
+                id INTEGER PRIMARY KEY CHECK(id = 1),
+                base_url TEXT NOT NULL,
+                encrypted_api_key TEXT,
+                configured_at TEXT,
+                verified_at TEXT,
+                last_error TEXT,
+                reference_resume_id TEXT,
+                reference_resume_name TEXT,
+                reference_template TEXT,
+                reference_updated_at TEXT,
+                resumes_json TEXT NOT NULL DEFAULT '[]',
+                updated_at TEXT NOT NULL
+            );
             """
         )
         _ensure_column(db, "jobs", "source_name", "TEXT")
@@ -182,6 +200,14 @@ def init_db(path: str | Path | None = None) -> None:
             INSERT OR IGNORE INTO discovery_config (
                 id, schedule_enabled, timezone, schedule_times_json, updated_at
             ) VALUES ('default', 1, 'Europe/Vienna', '["07:00","13:00","19:00"]', ?)
+            """,
+            (now,),
+        )
+        db.execute(
+            """
+            INSERT OR IGNORE INTO reactive_resume_config(
+                id, base_url, resumes_json, updated_at
+            ) VALUES (1, 'https://rxresu.me/api/openapi', '[]', ?)
             """,
             (now,),
         )

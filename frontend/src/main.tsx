@@ -11,17 +11,20 @@ import {
   Circle,
   Columns3,
   ExternalLink,
+  FileText,
   Inbox,
   ListFilter,
   LockKeyhole,
   LogOut,
   Save,
+  RefreshCw,
   ScanSearch,
   Settings2,
   SlidersHorizontal,
   Sparkles,
   Target,
   Trash2,
+  Unplug,
   UserRound,
   X
 } from "lucide-react";
@@ -146,6 +149,18 @@ type DiscoveryOperations = {
   recent_runs: DiscoveryRunSummary[];
 };
 
+type ReactiveResumeStatus = {
+  encryption_ready: boolean;
+  configured: boolean;
+  verified: boolean;
+  base_url: string;
+  configured_at: string | null;
+  last_verified_at: string | null;
+  last_error: string | null;
+  reference: { id: string; name: string; template: string | null; updated_at: string | null } | null;
+  available_resumes: Array<{ id: string; name: string; updated_at: string | null; historical_source: boolean }>;
+};
+
 type DashboardPulse = {
   days: Array<{ date: string; count: number }>;
   today_count: number;
@@ -175,6 +190,7 @@ function App() {
   const [preferences, setPreferences] = React.useState<Preferences | null>(null);
   const [pulse, setPulse] = React.useState<DashboardPulse>({ days: [], today_count: 0 });
   const [discoveryOperations, setDiscoveryOperations] = React.useState<DiscoveryOperations | null>(null);
+  const [reactiveResume, setReactiveResume] = React.useState<ReactiveResumeStatus | null>(null);
   const [loading, setLoading] = React.useState(true);
   const [discoveryRunning, setDiscoveryRunning] = React.useState(false);
   const [discoveryMessage, setDiscoveryMessage] = React.useState<string | null>(null);
@@ -194,6 +210,7 @@ function App() {
       setPreferences(null);
       setPulse({ days: [], today_count: 0 });
       setDiscoveryOperations(null);
+      setReactiveResume(null);
       setError(null);
       setDeclineOpen(false);
       return true;
@@ -267,10 +284,12 @@ function App() {
     if (view === "preferences") {
       Promise.all([
         api<Preferences>("/api/preferences"),
-        api<DiscoveryOperations>("/api/discovery/operations")
-      ]).then(([nextPreferences, operations]) => {
+        api<DiscoveryOperations>("/api/discovery/operations"),
+        api<ReactiveResumeStatus>("/api/integrations/reactive-resume")
+      ]).then(([nextPreferences, operations, resumeStatus]) => {
         setPreferences(nextPreferences);
         setDiscoveryOperations(operations);
+        setReactiveResume(resumeStatus);
       }).catch((reason: unknown) => {
         if (!handleAuthExpired(reason)) setError(messageFrom(reason));
       });
@@ -351,6 +370,22 @@ function App() {
     }
   }
 
+  async function updateReactiveResume(path: string, method: "POST" | "PUT" | "DELETE", payload?: unknown) {
+    try {
+      const options: RequestInit = { method };
+      if (payload !== undefined) {
+        options.headers = { "Content-Type": "application/json" };
+        options.body = JSON.stringify(payload);
+      }
+      const updated = await api<ReactiveResumeStatus>(path, options);
+      setReactiveResume(updated);
+      return updated;
+    } catch (reason) {
+      if (!handleAuthExpired(reason)) setError(messageFrom(reason));
+      throw reason;
+    }
+  }
+
   async function submitLogin(username: string, password: string) {
     const status = await api<AuthStatus>("/api/auth/login", {
       method: "POST",
@@ -374,6 +409,7 @@ function App() {
       setPreferences(null);
       setPulse({ days: [], today_count: 0 });
       setDiscoveryOperations(null);
+      setReactiveResume(null);
       setMobileDetailOpen(false);
       setDeclineOpen(false);
     }
@@ -434,8 +470,21 @@ function App() {
       operations={discoveryOperations}
       discoveryRunning={discoveryRunning}
       discoveryMessage={discoveryMessage}
+      reactiveResume={reactiveResume}
       onRunDiscovery={runDiscovery}
       onSaveDiscovery={saveDiscoveryConfig}
+      onConnectReactiveResume={(apiKey, baseUrl) => updateReactiveResume(
+        "/api/integrations/reactive-resume/connect",
+        "POST",
+        { api_key: apiKey, base_url: baseUrl }
+      )}
+      onRefreshReactiveResume={() => updateReactiveResume("/api/integrations/reactive-resume/refresh", "POST")}
+      onSelectReactiveResume={(resumeId) => updateReactiveResume(
+        "/api/integrations/reactive-resume/reference",
+        "PUT",
+        { resume_id: resumeId }
+      )}
+      onDisconnectReactiveResume={() => updateReactiveResume("/api/integrations/reactive-resume", "DELETE")}
       onSave={savePreferences}
     />
   ) : (
@@ -852,16 +901,26 @@ function PreferencesView({
   operations,
   discoveryRunning,
   discoveryMessage,
+  reactiveResume,
   onRunDiscovery,
   onSaveDiscovery,
+  onConnectReactiveResume,
+  onRefreshReactiveResume,
+  onSelectReactiveResume,
+  onDisconnectReactiveResume,
   onSave
 }: {
   preferences: Preferences;
   operations: DiscoveryOperations | null;
   discoveryRunning: boolean;
   discoveryMessage: string | null;
+  reactiveResume: ReactiveResumeStatus | null;
   onRunDiscovery: () => Promise<void>;
   onSaveDiscovery: (schedule: DiscoveryOperations["schedule"], sourcesEnabled: Record<string, boolean>) => Promise<DiscoveryOperations>;
+  onConnectReactiveResume: (apiKey: string, baseUrl: string) => Promise<ReactiveResumeStatus>;
+  onRefreshReactiveResume: () => Promise<ReactiveResumeStatus>;
+  onSelectReactiveResume: (resumeId: string) => Promise<ReactiveResumeStatus>;
+  onDisconnectReactiveResume: () => Promise<ReactiveResumeStatus>;
   onSave: (next: Preferences) => Promise<Preferences>;
 }) {
   const initial = normalizeEditablePreferences(preferences);
@@ -1100,6 +1159,14 @@ function PreferencesView({
           </div>
         </section>
 
+        <ReactiveResumePanel
+          status={reactiveResume}
+          onConnect={onConnectReactiveResume}
+          onRefresh={onRefreshReactiveResume}
+          onSelect={onSelectReactiveResume}
+          onDisconnect={onDisconnectReactiveResume}
+        />
+
         <div className="learning-note">
           <span className="company-mark dark"><BrainCircuit size={14} /></span>
           <b>Last learned from local feedback</b>
@@ -1124,6 +1191,145 @@ function PreferencesView({
         </footer>
       ) : null}
     </article>
+  );
+}
+
+function ReactiveResumePanel({
+  status,
+  onConnect,
+  onRefresh,
+  onSelect,
+  onDisconnect
+}: {
+  status: ReactiveResumeStatus | null;
+  onConnect: (apiKey: string, baseUrl: string) => Promise<ReactiveResumeStatus>;
+  onRefresh: () => Promise<ReactiveResumeStatus>;
+  onSelect: (resumeId: string) => Promise<ReactiveResumeStatus>;
+  onDisconnect: () => Promise<ReactiveResumeStatus>;
+}) {
+  const [apiKey, setApiKey] = React.useState("");
+  const [baseUrl, setBaseUrl] = React.useState(status?.base_url ?? "https://rxresu.me/api/openapi");
+  const [busy, setBusy] = React.useState(false);
+  const [panelError, setPanelError] = React.useState<string | null>(null);
+
+  React.useEffect(() => {
+    if (status?.base_url) setBaseUrl(status.base_url);
+  }, [status?.base_url]);
+
+  async function run(action: () => Promise<ReactiveResumeStatus>, clearKey = false) {
+    setBusy(true);
+    setPanelError(null);
+    try {
+      await action();
+      if (clearKey) setApiKey("");
+    } catch (reason) {
+      setPanelError(messageFrom(reason));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <section className="pref-section reactive-resume-panel" id="reactive-resume">
+      <div className="integration-heading">
+        <div>
+          <p className="eyebrow">CV INTEGRATION</p>
+          <h2>Reactive Resume</h2>
+        </div>
+        <span className={`integration-state ${status?.verified ? "ready" : ""}`}>
+          {status?.reference ? "READY" : status?.configured ? "CONNECTED" : "SETUP"}
+        </span>
+      </div>
+
+      {!status ? <p className="operations-loading">Loading connection status...</p> : !status.encryption_ready ? (
+        <div className="integration-warning">
+          <LockKeyhole size={16} /> Server secret storage must be configured before an API key can be accepted.
+        </div>
+      ) : !status.configured ? (
+        <form
+          className="integration-connect"
+          onSubmit={(event) => {
+            event.preventDefault();
+            void run(() => onConnect(apiKey, baseUrl), true);
+          }}
+        >
+          <p>Connect once. The API key is encrypted and never returned to this screen or to agents.</p>
+          <label>
+            <span>OPENAPI URL</span>
+            <input type="url" required value={baseUrl} onChange={(event) => setBaseUrl(event.target.value)} disabled={busy} />
+          </label>
+          <label>
+            <span>API KEY</span>
+            <input
+              type="password"
+              autoComplete="off"
+              required
+              value={apiKey}
+              onChange={(event) => setApiKey(event.target.value)}
+              disabled={busy}
+              placeholder="Paste once"
+            />
+          </label>
+          <button className="integration-primary" type="submit" disabled={busy || !apiKey.trim()}>
+            <LockKeyhole size={15} /> {busy ? "VERIFYING" : "CONNECT & VERIFY"}
+          </button>
+        </form>
+      ) : (
+        <div className="integration-ready">
+          {status.reference ? (
+            <div className="reference-card">
+              <span className="reference-icon"><FileText size={20} /></span>
+              <span>
+                <small>REFERENCE CV</small>
+                <b>{status.reference.name}</b>
+                <em>{status.reference.template ?? "Template unavailable"}{status.reference.updated_at ? ` · Updated ${formatDateTime(status.reference.updated_at)}` : ""}</em>
+              </span>
+            </div>
+          ) : (
+            <div className="integration-warning">Connected. Choose the canonical tailoring reference below.</div>
+          )}
+
+          <label className="reference-select">
+            <span>TAILORING REFERENCE</span>
+            <select
+              value={status.reference?.id ?? ""}
+              onChange={(event) => void run(() => onSelect(event.target.value))}
+              disabled={busy}
+            >
+              <option value="">Choose a reference CV</option>
+              {status.available_resumes.map((resume) => (
+                <option key={resume.id} value={resume.id} disabled={resume.historical_source}>
+                  {resume.name}{resume.historical_source ? " — historical source" : ""}
+                </option>
+              ))}
+            </select>
+          </label>
+
+          {status.reference ? (
+            <div className="reference-actions">
+              <a href="/api/integrations/reactive-resume/reference.pdf" target="_blank" rel="noreferrer">
+                <ExternalLink size={15} /> VIEW
+              </a>
+              <a href="/api/integrations/reactive-resume/reference.pdf?download=true">
+                <FileText size={15} /> DOWNLOAD
+              </a>
+            </div>
+          ) : null}
+
+          <p className="immutable-note">Job-specific CVs are created as duplicates. This reference is never edited in place.</p>
+          <div className="integration-secondary-actions">
+            <button type="button" onClick={() => void run(onRefresh)} disabled={busy}>
+              <RefreshCw size={14} /> REFRESH
+            </button>
+            <button type="button" onClick={() => void run(onDisconnect)} disabled={busy}>
+              <Unplug size={14} /> DISCONNECT
+            </button>
+          </div>
+        </div>
+      )}
+
+      {status?.last_error || panelError ? <p className="integration-error">{panelError ?? status?.last_error}</p> : null}
+    </section>
   );
 }
 

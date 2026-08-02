@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Literal
 
-from pydantic import BaseModel, Field, field_validator, model_validator
+from pydantic import BaseModel, Field, SecretStr, field_validator, model_validator
 
 
 Rating = Literal["good", "maybe", "bad"]
@@ -252,6 +252,41 @@ class DiscoveryOperationsOut(BaseModel):
     next_run_at: str | None = None
     last_run: DiscoveryRunSummary | None = None
     recent_runs: list[DiscoveryRunSummary] = Field(default_factory=list)
+
+
+class ReactiveResumeReference(BaseModel):
+    id: str
+    name: str
+    template: str | None = None
+    updated_at: str | None = None
+
+
+class ReactiveResumeOption(BaseModel):
+    id: str
+    name: str
+    updated_at: str | None = None
+    historical_source: bool = False
+
+
+class ReactiveResumeStatus(BaseModel):
+    encryption_ready: bool
+    configured: bool
+    verified: bool
+    base_url: str
+    configured_at: str | None = None
+    last_verified_at: str | None = None
+    last_error: str | None = None
+    reference: ReactiveResumeReference | None = None
+    available_resumes: list[ReactiveResumeOption] = Field(default_factory=list)
+
+
+class ReactiveResumeConnectIn(BaseModel):
+    api_key: SecretStr
+    base_url: str = "https://rxresu.me/api/openapi"
+
+
+class ReactiveResumeReferenceIn(BaseModel):
+    resume_id: str = Field(min_length=1, max_length=200)
 
 
 class DiscoveryScrapeResult(BaseModel):
