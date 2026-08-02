@@ -1628,7 +1628,19 @@ textarea {
 }
 
 @media (max-width: 860px) {
+  html,
+  body,
+  #root {
+    width: 100%;
+    height: 100%;
+    min-height: 0;
+    overflow: hidden;
+  }
+
   .app-shell {
+    height: 100dvh;
+    min-height: 0;
+    overflow: hidden;
     padding-top: max(0px, env(safe-area-inset-top));
   }
 
@@ -1639,12 +1651,19 @@ textarea {
   .workspace {
     display: block;
     width: 100%;
+    height: 100%;
+    min-height: 0;
     padding: 0;
   }
 
   .phone-surface {
     width: 100%;
-    min-height: calc(100svh - env(safe-area-inset-top));
+    height: 100%;
+    min-height: 0;
+    overflow-x: hidden;
+    overflow-y: auto;
+    overscroll-behavior-y: contain;
+    -webkit-overflow-scrolling: touch;
     border-radius: 0;
     box-shadow: none;
   }
@@ -1665,7 +1684,7 @@ textarea {
   .pipeline-screen,
   .activity-screen,
   .decline-screen {
-    min-height: calc(100svh - env(safe-area-inset-top));
+    min-height: 100%;
   }
 
   .review-body {
@@ -1711,6 +1730,12 @@ textarea {
   .activity-body,
   .preferences-body {
     padding-bottom: 94px;
+  }
+
+  .preferences-screen .sticky-submit {
+    position: sticky;
+    bottom: calc(66px + max(24px, env(safe-area-inset-bottom)));
+    z-index: 19;
   }
 
   .mobile-back {
