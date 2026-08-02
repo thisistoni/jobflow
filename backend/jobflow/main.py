@@ -1,12 +1,19 @@
 from __future__ import annotations
 
+import base64
+import binascii
+import os
+import secrets
 import uuid
 from contextlib import asynccontextmanager
+from pathlib import Path
 from typing import Any, Literal
 from urllib.parse import urlsplit
 
-from fastapi import FastAPI, HTTPException, Query
+from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
+from fastapi.staticfiles import StaticFiles
 
 from .database import connect, decode_json, encode_json, init_db, utc_now
 from .firecrawl import FirecrawlConfigError, FirecrawlProviderError, scrape_url, search_web
@@ -29,8 +36,14 @@ from .models import (
 )
 
 
+AUTH_USERNAME_ENV = "JOBFLOW_AUTH_USERNAME"
+AUTH_PASSWORD_ENV = "JOBFLOW_AUTH_PASSWORD"
+STATIC_DIR_ENV = "JOBFLOW_STATIC_DIR"
+
+
 @asynccontextmanager
 async def lifespan(_: FastAPI):
+    _auth_config()
     init_db()
     yield
 
@@ -43,6 +56,29 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+@app.middleware("http")
+async def basic_auth(request: Request, call_next: Any) -> Any:
+    if request.method == "GET" and request.url.path == "/health":
+        return await call_next(request)
+
+    config = _auth_config()
+    if config is None:
+        return await call_next(request)
+
+    credentials = _decode_basic_auth(request.headers.get("Authorization"))
+    if credentials is None:
+        return _auth_challenge()
+
+    expected_username, expected_password = config
+    username, password = credentials
+    username_matches = secrets.compare_digest(username.encode("utf-8"), expected_username.encode("utf-8"))
+    password_matches = secrets.compare_digest(password.encode("utf-8"), expected_password.encode("utf-8"))
+    if not (username_matches and password_matches):
+        return _auth_challenge()
+
+    return await call_next(request)
 
 
 @app.get("/health")
@@ -544,3 +580,46 @@ def _clean_list(values: list[str]) -> list[str]:
         if text and text not in cleaned:
             cleaned.append(text)
     return cleaned
+
+
+def _auth_config() -> tuple[str, str] | None:
+    username = os.environ.get(AUTH_USERNAME_ENV)
+    password = os.environ.get(AUTH_PASSWORD_ENV)
+    if bool(username) != bool(password):
+        raise RuntimeError(f"{AUTH_USERNAME_ENV} and {AUTH_PASSWORD_ENV} must be set together")
+    if not username and not password:
+        return None
+    return username, password
+
+
+def _decode_basic_auth(header: str | None) -> tuple[str, str] | None:
+    if not header or not header.startswith("Basic "):
+        return None
+    try:
+        decoded = base64.b64decode(header[6:], validate=True).decode("utf-8")
+    except (binascii.Error, UnicodeDecodeError):
+        return None
+    username, separator, password = decoded.partition(":")
+    if not separator:
+        return None
+    return username, password
+
+
+def _auth_challenge() -> JSONResponse:
+    return JSONResponse(
+        {"detail": "Authentication required"},
+        status_code=401,
+        headers={"WWW-Authenticate": 'Basic realm="JobFlow"'},
+    )
+
+
+def _mount_static_files() -> None:
+    static_dir = os.environ.get(STATIC_DIR_ENV)
+    if not static_dir:
+        return
+    path = Path(static_dir).expanduser().resolve()
+    if path.is_dir():
+        app.mount("/", StaticFiles(directory=path, html=True), name="frontend")
+
+
+_mount_static_files()

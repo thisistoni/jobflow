@@ -1,0 +1,16 @@
+services:
+  jobflow:
+    build: .
+    restart: unless-stopped
+    ports:
+      - "${JOBFLOW_BIND:-127.0.0.1}:${JOBFLOW_PORT:-8088}:8000"
+    environment:
+      JOBFLOW_AUTH_USERNAME: "${JOBFLOW_AUTH_USERNAME:?set JOBFLOW_AUTH_USERNAME in .env}"
+      JOBFLOW_AUTH_PASSWORD: "${JOBFLOW_AUTH_PASSWORD:?set JOBFLOW_AUTH_PASSWORD in .env}"
+      FIRECRAWL_API_URL: "${FIRECRAWL_API_URL:-}"
+      FIRECRAWL_API_KEY: "${FIRECRAWL_API_KEY:-}"
+    volumes:
+      - jobflow-data:/data
+
+volumes:
+  jobflow-data:
