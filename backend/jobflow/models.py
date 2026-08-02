@@ -122,6 +122,7 @@ class Preferences(BaseModel):
     salary_target_max: int | None = Field(default=None, ge=0)
     acceptable_salary_min: int | None = Field(default=None, ge=0)
     role_families: list[str] = Field(default_factory=list)
+    priority_role_families: list[str] = Field(default_factory=list)
     priorities: list[str] = Field(default_factory=list)
     hard_rules: list[str] = Field(default_factory=list)
     discovery_queries: list[str] = Field(default_factory=list)
@@ -187,9 +188,70 @@ class DiscoveryRunResult(DiscoverySearchResult):
 
 
 class DiscoveryRunOut(BaseModel):
+    run_id: str
     queries: list[str]
     limit_per_query: int
     results: list[DiscoveryRunResult]
+
+
+class DiscoverySourceConfig(BaseModel):
+    id: str
+    label: str
+    enabled: bool
+    status: Literal["available", "setup_required", "manual", "disabled", "failing"]
+    detail: str = ""
+
+
+class DiscoveryScheduleConfig(BaseModel):
+    enabled: bool = True
+    timezone: str = "Europe/Vienna"
+    times: list[str] = Field(default_factory=lambda: ["07:00", "13:00", "19:00"])
+
+    @field_validator("times", mode="before")
+    @classmethod
+    def clean_times(cls, value: object) -> list[str]:
+        values = value if isinstance(value, list) else []
+        cleaned: list[str] = []
+        for item in values:
+            text = str(item).strip()
+            parts = text.split(":")
+            if len(parts) != 2 or not all(part.isdigit() for part in parts):
+                raise ValueError("Schedule times must use HH:MM")
+            hour, minute = (int(part) for part in parts)
+            if not 0 <= hour <= 23 or not 0 <= minute <= 59:
+                raise ValueError("Schedule times must use HH:MM")
+            normalized = f"{hour:02d}:{minute:02d}"
+            if normalized not in cleaned:
+                cleaned.append(normalized)
+        if not cleaned:
+            raise ValueError("At least one discovery time is required")
+        return sorted(cleaned)
+
+
+class DiscoveryConfigIn(BaseModel):
+    schedule: DiscoveryScheduleConfig
+    sources_enabled: dict[str, bool] = Field(default_factory=dict)
+
+
+class DiscoveryRunSummary(BaseModel):
+    id: str
+    trigger: Literal["manual", "scheduled"]
+    status: Literal["running", "succeeded", "failed"]
+    started_at: str
+    finished_at: str | None = None
+    queries: list[str] = Field(default_factory=list)
+    candidate_count: int = 0
+    unique_count: int = 0
+    error: str | None = None
+
+
+class DiscoveryOperationsOut(BaseModel):
+    schedule: DiscoveryScheduleConfig
+    sources: list[DiscoverySourceConfig]
+    generated_queries: list[str]
+    next_run_at: str | None = None
+    last_run: DiscoveryRunSummary | None = None
+    recent_runs: list[DiscoveryRunSummary] = Field(default_factory=list)
 
 
 class DiscoveryScrapeResult(BaseModel):

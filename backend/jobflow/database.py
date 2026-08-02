@@ -108,6 +108,7 @@ def init_db(path: str | Path | None = None) -> None:
                 salary_target_max INTEGER,
                 acceptable_salary_min INTEGER,
                 role_families_json TEXT NOT NULL DEFAULT '[]',
+                priority_role_families_json TEXT NOT NULL DEFAULT '[]',
                 priorities_json TEXT NOT NULL DEFAULT '[]',
                 hard_rules_json TEXT NOT NULL DEFAULT '[]',
                 discovery_queries_json TEXT NOT NULL DEFAULT '[]',
@@ -126,6 +127,45 @@ def init_db(path: str | Path | None = None) -> None:
                 job_id TEXT REFERENCES jobs(id) ON DELETE SET NULL,
                 created_at TEXT NOT NULL
             );
+
+            CREATE TABLE IF NOT EXISTS discovery_config (
+                id TEXT PRIMARY KEY CHECK (id = 'default'),
+                schedule_enabled INTEGER NOT NULL DEFAULT 1,
+                timezone TEXT NOT NULL DEFAULT 'Europe/Vienna',
+                schedule_times_json TEXT NOT NULL DEFAULT '["07:00","13:00","19:00"]',
+                last_scheduled_slot TEXT,
+                updated_at TEXT NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS discovery_sources (
+                id TEXT PRIMARY KEY,
+                label TEXT NOT NULL,
+                enabled INTEGER NOT NULL DEFAULT 0,
+                status TEXT NOT NULL,
+                detail TEXT NOT NULL DEFAULT '',
+                updated_at TEXT NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS discovery_runs (
+                id TEXT PRIMARY KEY,
+                trigger TEXT NOT NULL CHECK (trigger IN ('manual', 'scheduled')),
+                status TEXT NOT NULL CHECK (status IN ('running', 'succeeded', 'failed')),
+                started_at TEXT NOT NULL,
+                finished_at TEXT,
+                queries_json TEXT NOT NULL DEFAULT '[]',
+                candidate_count INTEGER NOT NULL DEFAULT 0,
+                unique_count INTEGER NOT NULL DEFAULT 0,
+                error TEXT
+            );
+
+            CREATE TABLE IF NOT EXISTS discovery_candidates (
+                run_id TEXT NOT NULL REFERENCES discovery_runs(id) ON DELETE CASCADE,
+                url TEXT NOT NULL,
+                title TEXT NOT NULL DEFAULT '',
+                description TEXT NOT NULL DEFAULT '',
+                matched_queries_json TEXT NOT NULL DEFAULT '[]',
+                PRIMARY KEY (run_id, url)
+            );
             """
         )
         _ensure_column(db, "jobs", "source_name", "TEXT")
@@ -135,6 +175,30 @@ def init_db(path: str | Path | None = None) -> None:
         _ensure_column(db, "jobs", "salary_currency", "TEXT")
         _ensure_column(db, "preferences", "discovery_queries_json", "TEXT NOT NULL DEFAULT '[]'")
         _ensure_column(db, "preferences", "discovery_limit_per_query", "INTEGER NOT NULL DEFAULT 5")
+        _ensure_column(db, "preferences", "priority_role_families_json", "TEXT NOT NULL DEFAULT '[]'")
+        now = utc_now()
+        db.execute(
+            """
+            INSERT OR IGNORE INTO discovery_config (
+                id, schedule_enabled, timezone, schedule_times_json, updated_at
+            ) VALUES ('default', 1, 'Europe/Vienna', '["07:00","13:00","19:00"]', ?)
+            """,
+            (now,),
+        )
+        source_defaults = [
+            ("open_web", "Open web", 1, "available", "Public job results through the configured search provider."),
+            ("company_careers", "Company career pages", 0, "available", "Prioritize direct employer career pages."),
+            ("karriere_alerts", "karriere.at Job Alarm", 0, "setup_required", "Official alert links; inbox connection is not configured yet."),
+            ("ams_manual", "AMS eJob-Room", 0, "manual", "Manual review and URL intake only."),
+            ("devjobs", "DEVjobs.at", 0, "disabled", "Automated collection is disabled pending a source-policy review."),
+        ]
+        db.executemany(
+            """
+            INSERT OR IGNORE INTO discovery_sources (id, label, enabled, status, detail, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            [(*source, now) for source in source_defaults],
+        )
 
 
 def _ensure_column(db: sqlite3.Connection, table: str, column: str, definition: str) -> None:

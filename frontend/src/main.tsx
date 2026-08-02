@@ -92,6 +92,7 @@ type Preferences = {
   salary_target_max?: number | null;
   acceptable_salary_min?: number | null;
   role_families: string[];
+  priority_role_families: string[];
   priorities: string[];
   hard_rules: string[];
   discovery_queries: string[];
@@ -112,9 +113,37 @@ type ActivityItem = {
 };
 
 type DiscoveryRun = {
+  run_id: string;
   queries: string[];
   limit_per_query: number;
   results: Array<{ url: string; title?: string | null; description?: string | null }>;
+};
+
+type DiscoveryRunSummary = {
+  id: string;
+  trigger: "manual" | "scheduled";
+  status: "running" | "succeeded" | "failed";
+  started_at: string;
+  finished_at?: string | null;
+  queries: string[];
+  candidate_count: number;
+  unique_count: number;
+  error?: string | null;
+};
+
+type DiscoveryOperations = {
+  schedule: { enabled: boolean; timezone: string; times: string[] };
+  sources: Array<{
+    id: string;
+    label: string;
+    enabled: boolean;
+    status: "available" | "setup_required" | "manual" | "disabled" | "failing";
+    detail: string;
+  }>;
+  generated_queries: string[];
+  next_run_at?: string | null;
+  last_run?: DiscoveryRunSummary | null;
+  recent_runs: DiscoveryRunSummary[];
 };
 
 type DashboardPulse = {
@@ -145,6 +174,7 @@ function App() {
   const [activity, setActivity] = React.useState<ActivityItem[]>([]);
   const [preferences, setPreferences] = React.useState<Preferences | null>(null);
   const [pulse, setPulse] = React.useState<DashboardPulse>({ days: [], today_count: 0 });
+  const [discoveryOperations, setDiscoveryOperations] = React.useState<DiscoveryOperations | null>(null);
   const [loading, setLoading] = React.useState(true);
   const [discoveryRunning, setDiscoveryRunning] = React.useState(false);
   const [discoveryMessage, setDiscoveryMessage] = React.useState<string | null>(null);
@@ -163,6 +193,7 @@ function App() {
       setActivity([]);
       setPreferences(null);
       setPulse({ days: [], today_count: 0 });
+      setDiscoveryOperations(null);
       setError(null);
       setDeclineOpen(false);
       return true;
@@ -234,7 +265,13 @@ function App() {
       });
     }
     if (view === "preferences") {
-      api<Preferences>("/api/preferences").then(setPreferences).catch((reason: unknown) => {
+      Promise.all([
+        api<Preferences>("/api/preferences"),
+        api<DiscoveryOperations>("/api/discovery/operations")
+      ]).then(([nextPreferences, operations]) => {
+        setPreferences(nextPreferences);
+        setDiscoveryOperations(operations);
+      }).catch((reason: unknown) => {
         if (!handleAuthExpired(reason)) setError(messageFrom(reason));
       });
     }
@@ -271,6 +308,8 @@ function App() {
           ? "1 candidate found for agent review."
           : `${result.results.length} candidates found for agent review.`
       );
+      setDiscoveryOperations(await api<DiscoveryOperations>("/api/discovery/operations"));
+      setActivity(await api<ActivityItem[]>("/api/activity"));
       await loadJobs();
     } catch (reason) {
       if (!handleAuthExpired(reason)) setError(messageFrom(reason));
@@ -287,6 +326,23 @@ function App() {
         body: JSON.stringify(next)
       });
       setPreferences(updated);
+      setDiscoveryOperations(await api<DiscoveryOperations>("/api/discovery/operations"));
+      setActivity(await api<ActivityItem[]>("/api/activity"));
+      return updated;
+    } catch (reason) {
+      if (!handleAuthExpired(reason)) setError(messageFrom(reason));
+      throw reason;
+    }
+  }
+
+  async function saveDiscoveryConfig(schedule: DiscoveryOperations["schedule"], sourcesEnabled: Record<string, boolean>) {
+    try {
+      const updated = await api<DiscoveryOperations>("/api/discovery/config", {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ schedule, sources_enabled: sourcesEnabled })
+      });
+      setDiscoveryOperations(updated);
       setActivity(await api<ActivityItem[]>("/api/activity"));
       return updated;
     } catch (reason) {
@@ -317,6 +373,7 @@ function App() {
       setActivity([]);
       setPreferences(null);
       setPulse({ days: [], today_count: 0 });
+      setDiscoveryOperations(null);
       setMobileDetailOpen(false);
       setDeclineOpen(false);
     }
@@ -372,7 +429,15 @@ function App() {
       }}
     />
   ) : preferences ? (
-    <PreferencesView preferences={preferences} onSave={savePreferences} />
+    <PreferencesView
+      preferences={preferences}
+      operations={discoveryOperations}
+      discoveryRunning={discoveryRunning}
+      discoveryMessage={discoveryMessage}
+      onRunDiscovery={runDiscovery}
+      onSaveDiscovery={saveDiscoveryConfig}
+      onSave={savePreferences}
+    />
   ) : (
     <div className="state-card">Loading preferences...</div>
   );
@@ -782,7 +847,23 @@ function LoginScreen({
   );
 }
 
-function PreferencesView({ preferences, onSave }: { preferences: Preferences; onSave: (next: Preferences) => Promise<Preferences> }) {
+function PreferencesView({
+  preferences,
+  operations,
+  discoveryRunning,
+  discoveryMessage,
+  onRunDiscovery,
+  onSaveDiscovery,
+  onSave
+}: {
+  preferences: Preferences;
+  operations: DiscoveryOperations | null;
+  discoveryRunning: boolean;
+  discoveryMessage: string | null;
+  onRunDiscovery: () => Promise<void>;
+  onSaveDiscovery: (schedule: DiscoveryOperations["schedule"], sourcesEnabled: Record<string, boolean>) => Promise<DiscoveryOperations>;
+  onSave: (next: Preferences) => Promise<Preferences>;
+}) {
   const initial = normalizeEditablePreferences(preferences);
   const [draft, setDraft] = React.useState(initial);
   const [baseline, setBaseline] = React.useState(initial);
@@ -795,9 +876,6 @@ function PreferencesView({ preferences, onSave }: { preferences: Preferences; on
     setSaveError(null);
   }, [preferences]);
 
-  function setList(key: keyof Preferences, value: string) {
-    setDraft((current) => ({ ...current, [key]: value.split("\n").map((item) => item.trim()).filter(Boolean) }));
-  }
 
   function toggleWorkMode(mode: string) {
     const nextModes = draft.work_modes.includes(mode)
@@ -943,31 +1021,61 @@ function PreferencesView({ preferences, onSave }: { preferences: Preferences; on
           ))}
         </section>
 
-        <EditorArea label="Target locations" value={draft.target_locations.join("\n")} onChange={(value) => setList("target_locations", value)} />
+        <TagEditor
+          label="Target locations"
+          placeholder="Add a city or region…"
+          values={draft.target_locations}
+          onChange={(target_locations) => setDraft({ ...draft, target_locations })}
+        />
         <TagEditor
           label="Roles & keywords"
+          placeholder="Add a role or keyword…"
           values={draft.role_families}
-          onChange={(role_families) => setDraft({ ...draft, role_families })}
+          onChange={(role_families) => setDraft({
+            ...draft,
+            role_families,
+            priority_role_families: draft.priority_role_families.filter((priority) => role_families.some((role) => role.toLocaleLowerCase() === priority.toLocaleLowerCase()))
+          })}
         />
-        <EditorArea label="Discovery queries" value={draft.discovery_queries.join("\n")} onChange={(value) => setList("discovery_queries", value)} />
+        <TagEditor
+          label="Custom search phrases"
+          placeholder="Optional exact search phrase…"
+          values={draft.discovery_queries}
+          onChange={(discovery_queries) => setDraft({ ...draft, discovery_queries })}
+        />
 
         <section className="pref-section">
           <div className="section-head">
-            <h2>Prioritize</h2>
-            <span>EDIT</span>
+            <h2>Priority roles</h2>
+            <span>PICK UP TO 5</span>
           </div>
-          <div className="interest-chips">
-            {draft.priorities.slice(0, 5).map((priority) => (
-              <span key={priority}>{priority.toUpperCase()}</span>
-            ))}
+          <p className="priority-help">Choose which of your role tags should lead discovery and ranking.</p>
+          <div className="priority-role-grid">
+            {draft.role_families.map((role) => {
+              const selected = draft.priority_role_families.some((item) => item.toLocaleLowerCase() === role.toLocaleLowerCase());
+              return (
+                <button
+                  type="button"
+                  className={selected ? "selected" : ""}
+                  key={role}
+                  onClick={() => setDraft({
+                    ...draft,
+                    priority_role_families: selected
+                      ? draft.priority_role_families.filter((item) => item.toLocaleLowerCase() !== role.toLocaleLowerCase())
+                      : draft.priority_role_families.length < 5 ? [...draft.priority_role_families, role] : draft.priority_role_families
+                  })}
+                >
+                  {selected ? <Check size={12} /> : null}{role}
+                </button>
+              );
+            })}
           </div>
-          <EditorArea label="Priorities" value={draft.priorities.join("\n")} onChange={(value) => setList("priorities", value)} compact />
         </section>
 
         <section className="pref-section" id="search-automation">
-          <h2>Discovery</h2>
+          <h2>Discovery operations</h2>
           <label className="inline-field">
-            <span>RESULTS PER QUERY</span>
+            <span>RESULTS PER SEARCH</span>
             <input
               type="number"
               min={1}
@@ -976,6 +1084,13 @@ function PreferencesView({ preferences, onSave }: { preferences: Preferences; on
               onChange={(event) => setDraft({ ...draft, discovery_limit_per_query: boundedNumber(event.target.value, 1, 20, 5) })}
             />
           </label>
+          <DiscoveryOperationsPanel
+            operations={operations}
+            running={discoveryRunning}
+            message={discoveryMessage}
+            onRun={onRunDiscovery}
+            onSave={onSaveDiscovery}
+          />
           <div className="approval-boundary">
             <span className="company-mark dark"><LockKeyhole size={14} /></span>
             <span>
@@ -1009,6 +1124,139 @@ function PreferencesView({ preferences, onSave }: { preferences: Preferences; on
         </footer>
       ) : null}
     </article>
+  );
+}
+
+function DiscoveryOperationsPanel({
+  operations,
+  running,
+  message,
+  onRun,
+  onSave
+}: {
+  operations: DiscoveryOperations | null;
+  running: boolean;
+  message: string | null;
+  onRun: () => Promise<void>;
+  onSave: (schedule: DiscoveryOperations["schedule"], sourcesEnabled: Record<string, boolean>) => Promise<DiscoveryOperations>;
+}) {
+  const [schedule, setSchedule] = React.useState<DiscoveryOperations["schedule"] | null>(operations?.schedule ?? null);
+  const [sourcesEnabled, setSourcesEnabled] = React.useState<Record<string, boolean>>(
+    Object.fromEntries((operations?.sources ?? []).map((source) => [source.id, source.enabled]))
+  );
+  const [saving, setSaving] = React.useState(false);
+  const [configError, setConfigError] = React.useState<string | null>(null);
+
+  React.useEffect(() => {
+    if (!operations) return;
+    setSchedule(operations.schedule);
+    setSourcesEnabled(Object.fromEntries(operations.sources.map((source) => [source.id, source.enabled])));
+    setConfigError(null);
+  }, [operations]);
+
+  if (!operations || !schedule) return <div className="operations-loading">Loading discovery configuration…</div>;
+  const baselineSources = Object.fromEntries(operations.sources.map((source) => [source.id, source.enabled]));
+  const dirty = JSON.stringify(schedule) !== JSON.stringify(operations.schedule)
+    || JSON.stringify(sourcesEnabled) !== JSON.stringify(baselineSources);
+
+  async function saveConfig() {
+    if (!schedule) return;
+    setSaving(true);
+    setConfigError(null);
+    try {
+      await onSave(schedule, sourcesEnabled);
+    } catch (reason) {
+      setConfigError(messageFrom(reason));
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  return (
+    <div className="discovery-operations">
+      <div className="operations-summary">
+        <div>
+          <span>NEXT SEARCH</span>
+          <strong>{operations.next_run_at ? formatDateTime(operations.next_run_at) : "PAUSED"}</strong>
+        </div>
+        <div>
+          <span>LAST SEARCH</span>
+          <strong>{operations.last_run ? formatDateTime(operations.last_run.started_at) : "NOT RUN"}</strong>
+        </div>
+      </div>
+
+      <button className="search-now" type="button" disabled={running} onClick={() => void onRun()}>
+        <ScanSearch size={16} /> {running ? "SEARCHING…" : "SEARCH NOW"}
+      </button>
+      {message ? <p className="operation-message">{message}</p> : null}
+
+      <div className="operation-block">
+        <div className="operation-heading">
+          <div><b>Vienna schedule</b><small>{schedule.timezone}</small></div>
+          <button
+            type="button"
+            className={schedule.enabled ? "mini-toggle on" : "mini-toggle"}
+            onClick={() => setSchedule({ ...schedule, enabled: !schedule.enabled })}
+            aria-label={schedule.enabled ? "Pause scheduled discovery" : "Enable scheduled discovery"}
+          ><i /></button>
+        </div>
+        <div className="schedule-times">
+          {schedule.times.map((time, index) => (
+            <label key={`${index}-${time}`}>
+              <span>RUN {index + 1}</span>
+              <input
+                type="time"
+                value={time}
+                onChange={(event) => setSchedule({ ...schedule, times: schedule.times.map((item, itemIndex) => itemIndex === index ? event.target.value : item) })}
+              />
+            </label>
+          ))}
+        </div>
+      </div>
+
+      <div className="operation-block">
+        <div className="operation-heading"><div><b>Sources</b><small>Only available sources can be enabled.</small></div></div>
+        <div className="source-list">
+          {operations.sources.map((source) => (
+            <button
+              type="button"
+              className={sourcesEnabled[source.id] ? "source-row selected" : "source-row"}
+              disabled={source.status !== "available"}
+              key={source.id}
+              onClick={() => setSourcesEnabled({ ...sourcesEnabled, [source.id]: !sourcesEnabled[source.id] })}
+            >
+              <span>{sourcesEnabled[source.id] ? <Check size={12} /> : null}</span>
+              <span><b>{source.label}</b><small>{source.detail}</small></span>
+              <em>{source.status.replace("_", " ")}</em>
+            </button>
+          ))}
+        </div>
+      </div>
+
+      <div className="operation-block query-preview">
+        <div className="operation-heading"><div><b>Search plan</b><small>Generated from saved priority roles and locations.</small></div><em>{operations.generated_queries.length}</em></div>
+        {operations.generated_queries.slice(0, 4).map((query) => <span key={query}>{query}</span>)}
+        {operations.generated_queries.length > 4 ? <small>+{operations.generated_queries.length - 4} more searches</small> : null}
+      </div>
+
+      {dirty || configError ? (
+        <div className="operations-save">
+          {configError ? <small>{configError}</small> : null}
+          <button type="button" disabled={saving} onClick={() => void saveConfig()}><Save size={14} /> {saving ? "SAVING" : "SAVE SCHEDULE"}</button>
+        </div>
+      ) : null}
+
+      <div className="operation-block run-history">
+        <div className="operation-heading"><div><b>Run history</b><small>Recent manual and scheduled searches.</small></div></div>
+        {operations.recent_runs.slice(0, 5).map((run) => (
+          <div className="run-row" key={run.id}>
+            <span className={`run-state ${run.status}`} />
+            <span><b>{run.status === "succeeded" ? `${run.unique_count} candidates` : run.status}</b><small>{run.trigger} · {formatDateTime(run.started_at)}{run.error ? ` · ${run.error}` : ""}</small></span>
+          </div>
+        ))}
+        {operations.recent_runs.length === 0 ? <p className="operations-empty">No searches have run yet.</p> : null}
+      </div>
+    </div>
   );
 }
 
@@ -1156,7 +1404,7 @@ function ListSection({ title, icon, items, empty }: { title: string; icon: React
   );
 }
 
-function TagEditor({ label, values, onChange }: { label: string; values: string[]; onChange: (values: string[]) => void }) {
+function TagEditor({ label, placeholder = "Add another…", values, onChange }: { label: string; placeholder?: string; values: string[]; onChange: (values: string[]) => void }) {
   const [input, setInput] = React.useState("");
   const inputRef = React.useRef<HTMLInputElement>(null);
 
@@ -1195,7 +1443,7 @@ function TagEditor({ label, values, onChange }: { label: string; values: string[
         <input
           ref={inputRef}
           aria-label={`Add ${label.toLowerCase()}`}
-          placeholder={values.length ? "Add another…" : "Type a role or keyword…"}
+          placeholder={values.length ? "Add another…" : placeholder}
           value={input}
           onChange={(event) => {
             const next = event.target.value;
@@ -1368,6 +1616,10 @@ function formatTime(value: string) {
   return new Intl.DateTimeFormat(undefined, { hour: "2-digit", minute: "2-digit" }).format(new Date(value));
 }
 
+function formatDateTime(value: string) {
+  return new Intl.DateTimeFormat(undefined, { month: "short", day: "2-digit", hour: "2-digit", minute: "2-digit" }).format(new Date(value)).toUpperCase();
+}
+
 function formatAge(value?: string) {
   if (!value) return "NEW";
   return new Intl.DateTimeFormat(undefined, { month: "short", day: "2-digit" }).format(new Date(value)).toUpperCase();
@@ -1448,6 +1700,7 @@ function normalizeEditablePreferences(preferences: Preferences): Preferences {
   return {
     ...preferences,
     role_families: Array.from(new Set(preferences.role_families.map(humanizeRole).filter(Boolean))),
+    priority_role_families: Array.from(new Set((preferences.priority_role_families ?? []).map(humanizeRole).filter(Boolean))),
     hard_rules: preferences.hard_rules.filter((rule) => !isInternalPolicyRule(rule)),
     manual_submission_only: true
   };

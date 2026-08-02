@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import base64
 import binascii
 import hashlib
@@ -9,7 +10,7 @@ import os
 import secrets
 import time
 import uuid
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, suppress
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Literal
@@ -29,12 +30,17 @@ from .models import (
     ActivityItem,
     DailyPulseItem,
     DashboardPulseOut,
+    DiscoveryConfigIn,
+    DiscoveryOperationsOut,
     DiscoveryRunOut,
     DiscoveryRunResult,
+    DiscoveryRunSummary,
+    DiscoveryScheduleConfig,
     DiscoveryScrapeIn,
     DiscoveryScrapeResult,
     DiscoverySearchIn,
     DiscoverySearchResult,
+    DiscoverySourceConfig,
     FeedbackIn,
     FeedbackOut,
     JobAnalysisIn,
@@ -59,7 +65,13 @@ async def lifespan(_: FastAPI):
     _auth_config()
     _cookie_secure()
     init_db()
-    yield
+    scheduler = asyncio.create_task(_discovery_scheduler())
+    try:
+        yield
+    finally:
+        scheduler.cancel()
+        with suppress(asyncio.CancelledError):
+            await scheduler
 
 
 app = FastAPI(title="JobFlow", version="0.1.0", lifespan=lifespan)
@@ -433,11 +445,11 @@ def update_preferences(payload: Preferences) -> Preferences:
             INSERT INTO preferences (
                 id, target_locations_json, work_modes_json, min_home_office_days,
                 salary_currency, salary_target_min, salary_target_max, acceptable_salary_min,
-                role_families_json, priorities_json, hard_rules_json,
+                role_families_json, priority_role_families_json, priorities_json, hard_rules_json,
                 discovery_queries_json, discovery_limit_per_query,
                 language_preference, application_language, manual_submission_only, updated_at
             )
-            VALUES ('default', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES ('default', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(id) DO UPDATE SET
                 target_locations_json = excluded.target_locations_json,
                 work_modes_json = excluded.work_modes_json,
@@ -447,6 +459,7 @@ def update_preferences(payload: Preferences) -> Preferences:
                 salary_target_max = excluded.salary_target_max,
                 acceptable_salary_min = excluded.acceptable_salary_min,
                 role_families_json = excluded.role_families_json,
+                priority_role_families_json = excluded.priority_role_families_json,
                 priorities_json = excluded.priorities_json,
                 hard_rules_json = excluded.hard_rules_json,
                 discovery_queries_json = excluded.discovery_queries_json,
@@ -465,6 +478,7 @@ def update_preferences(payload: Preferences) -> Preferences:
                 payload.salary_target_max,
                 payload.acceptable_salary_min,
                 encode_json(payload.role_families),
+                encode_json(payload.priority_role_families),
                 encode_json(payload.priorities),
                 encode_json(payload.hard_rules),
                 encode_json(payload.discovery_queries),
@@ -503,39 +517,52 @@ def discovery_scrape(payload: DiscoveryScrapeIn) -> DiscoveryScrapeResult:
         raise _firecrawl_http_exception(exc) from exc
 
 
+@app.get("/api/discovery/operations", response_model=DiscoveryOperationsOut)
+def discovery_operations() -> DiscoveryOperationsOut:
+    return _discovery_operations()
+
+
+@app.put("/api/discovery/config", response_model=DiscoveryOperationsOut)
+def update_discovery_config(payload: DiscoveryConfigIn) -> DiscoveryOperationsOut:
+    try:
+        ZoneInfo(payload.schedule.timezone)
+    except (KeyError, ValueError) as exc:
+        raise HTTPException(status_code=422, detail="Unknown discovery timezone") from exc
+    now = utc_now()
+    with connect() as db:
+        known_sources = {row["id"]: dict(row) for row in db.execute("SELECT * FROM discovery_sources").fetchall()}
+        unknown = sorted(set(payload.sources_enabled) - set(known_sources))
+        if unknown:
+            raise HTTPException(status_code=422, detail=f"Unknown discovery source: {unknown[0]}")
+        for source_id, enabled in payload.sources_enabled.items():
+            source = known_sources[source_id]
+            if enabled and source["status"] != "available":
+                raise HTTPException(status_code=422, detail=f"{source['label']} is {source['status'].replace('_', ' ')}")
+            db.execute(
+                "UPDATE discovery_sources SET enabled = ?, updated_at = ? WHERE id = ?",
+                (1 if enabled else 0, now, source_id),
+            )
+        db.execute(
+            """
+            UPDATE discovery_config
+            SET schedule_enabled = ?, timezone = ?, schedule_times_json = ?, updated_at = ?
+            WHERE id = 'default'
+            """,
+            (1 if payload.schedule.enabled else 0, payload.schedule.timezone, encode_json(payload.schedule.times), now),
+        )
+        db.execute(
+            """
+            INSERT INTO activity (id, kind, title, body, created_at)
+            VALUES (?, 'discovery_config', 'Discovery schedule updated', ?, ?)
+            """,
+            (str(uuid.uuid4()), f"{payload.schedule.timezone} · {' / '.join(payload.schedule.times)}", now),
+        )
+    return _discovery_operations()
+
+
 @app.post("/api/discovery/run", response_model=DiscoveryRunOut)
 def discovery_run() -> DiscoveryRunOut:
-    preferences = get_preferences()
-    queries = _clean_list(preferences.discovery_queries)
-    if not queries:
-        raise HTTPException(status_code=400, detail="No discovery queries are configured")
-
-    candidates: dict[str, DiscoveryRunResult] = {}
-    try:
-        for query in queries:
-            for item in search_web(query, preferences.discovery_limit_per_query):
-                try:
-                    canonical_url = canonicalize_url(item["url"])
-                except ValueError:
-                    continue
-                candidate = candidates.get(canonical_url)
-                if candidate is None:
-                    candidates[canonical_url] = DiscoveryRunResult(
-                        url=canonical_url,
-                        title=item["title"],
-                        description=item["description"],
-                        matched_queries=[query],
-                    )
-                elif query not in candidate.matched_queries:
-                    candidate.matched_queries.append(query)
-    except (FirecrawlConfigError, FirecrawlProviderError) as exc:
-        raise _firecrawl_http_exception(exc) from exc
-
-    return DiscoveryRunOut(
-        queries=queries,
-        limit_per_query=preferences.discovery_limit_per_query,
-        results=list(candidates.values()),
-    )
+    return _execute_discovery("manual")
 
 
 @app.get("/api/activity", response_model=list[ActivityItem])
@@ -568,6 +595,240 @@ def dashboard_pulse(days: int = Query(20, ge=7, le=31)) -> DashboardPulseOut:
             counts[local_day] += 1
     pulse_days = [DailyPulseItem(date=day.isoformat(), count=count) for day, count in counts.items()]
     return DashboardPulseOut(days=pulse_days, today_count=counts[today])
+
+
+def _discovery_operations() -> DiscoveryOperationsOut:
+    with connect() as db:
+        config = db.execute("SELECT * FROM discovery_config WHERE id = 'default'").fetchone()
+        source_rows = db.execute("SELECT * FROM discovery_sources ORDER BY rowid").fetchall()
+        run_rows = db.execute(
+            "SELECT * FROM discovery_runs ORDER BY started_at DESC, id DESC LIMIT 20"
+        ).fetchall()
+    if config is None:
+        raise HTTPException(status_code=500, detail="Discovery configuration is unavailable")
+    schedule = DiscoveryScheduleConfig(
+        enabled=bool(config["schedule_enabled"]),
+        timezone=config["timezone"],
+        times=decode_json(config["schedule_times_json"], ["07:00", "13:00", "19:00"]),
+    )
+    provider_ready = bool(os.environ.get("FIRECRAWL_API_URL") and os.environ.get("FIRECRAWL_API_KEY"))
+    sources: list[DiscoverySourceConfig] = []
+    for row in source_rows:
+        status = row["status"]
+        detail = row["detail"]
+        if row["id"] in {"open_web", "company_careers"} and not provider_ready:
+            status = "setup_required"
+            detail = "Configure the JobFlow search provider before enabling this source."
+        sources.append(
+            DiscoverySourceConfig(
+                id=row["id"],
+                label=row["label"],
+                enabled=bool(row["enabled"]),
+                status=status,
+                detail=detail,
+            )
+        )
+    preferences = get_preferences()
+    enabled_source_ids = {source.id for source in sources if source.enabled and source.status == "available"}
+    runs = [_discovery_run_summary(row) for row in run_rows]
+    return DiscoveryOperationsOut(
+        schedule=schedule,
+        sources=sources,
+        generated_queries=_generated_discovery_queries(preferences, enabled_source_ids),
+        next_run_at=_next_discovery_run(schedule),
+        last_run=runs[0] if runs else None,
+        recent_runs=runs,
+    )
+
+
+def _generated_discovery_queries(preferences: Preferences, enabled_source_ids: set[str]) -> list[str]:
+    custom = _clean_list(preferences.discovery_queries)
+    if custom:
+        return custom[:12]
+    priority_roles = _clean_list(preferences.priority_role_families)
+    roles = priority_roles + [
+        role for role in _clean_list(preferences.role_families)
+        if role.casefold() not in {priority.casefold() for priority in priority_roles}
+    ]
+    locations = _clean_list(preferences.target_locations) or ["Vienna"]
+    queries: list[str] = []
+    for role in roles[:6]:
+        for location in locations[:2]:
+            suffix = " company careers" if enabled_source_ids == {"company_careers"} else " jobs"
+            queries.append(f"{role}{suffix} {location}")
+            if len(queries) >= 12:
+                return queries
+    return queries
+
+
+def _execute_discovery(trigger: Literal["manual", "scheduled"]) -> DiscoveryRunOut:
+    run_id = str(uuid.uuid4())
+    started_at = utc_now()
+    preferences = get_preferences()
+    operations = _discovery_operations()
+    enabled_sources = {source.id for source in operations.sources if source.enabled and source.status == "available"}
+    queries = _generated_discovery_queries(preferences, enabled_sources)
+    with connect() as db:
+        db.execute(
+            """
+            INSERT INTO discovery_runs (id, trigger, status, started_at, queries_json)
+            VALUES (?, ?, 'running', ?, ?)
+            """,
+            (run_id, trigger, started_at, encode_json(queries)),
+        )
+
+    try:
+        if not enabled_sources:
+            raise HTTPException(status_code=400, detail="Enable at least one available discovery source")
+        if not queries:
+            raise HTTPException(status_code=400, detail="Add at least one role or custom search phrase")
+        candidates: dict[str, DiscoveryRunResult] = {}
+        candidate_count = 0
+        for query in queries:
+            results = search_web(query, preferences.discovery_limit_per_query)
+            candidate_count += len(results)
+            for item in results:
+                try:
+                    canonical_url = canonicalize_url(item["url"])
+                except ValueError:
+                    continue
+                candidate = candidates.get(canonical_url)
+                if candidate is None:
+                    candidates[canonical_url] = DiscoveryRunResult(
+                        url=canonical_url,
+                        title=item["title"],
+                        description=item["description"],
+                        matched_queries=[query],
+                    )
+                elif query not in candidate.matched_queries:
+                    candidate.matched_queries.append(query)
+    except (FirecrawlConfigError, FirecrawlProviderError) as exc:
+        _finish_failed_discovery_run(run_id, str(exc))
+        raise _firecrawl_http_exception(exc) from exc
+    except HTTPException as exc:
+        _finish_failed_discovery_run(run_id, str(exc.detail))
+        raise
+    except Exception as exc:
+        _finish_failed_discovery_run(run_id, str(exc))
+        raise
+
+    finished_at = utc_now()
+    result_items = list(candidates.values())
+    with connect() as db:
+        db.executemany(
+            """
+            INSERT INTO discovery_candidates (run_id, url, title, description, matched_queries_json)
+            VALUES (?, ?, ?, ?, ?)
+            """,
+            [
+                (run_id, item.url, item.title, item.description, encode_json(item.matched_queries))
+                for item in result_items
+            ],
+        )
+        db.execute(
+            """
+            UPDATE discovery_runs
+            SET status = 'succeeded', finished_at = ?, candidate_count = ?, unique_count = ?
+            WHERE id = ?
+            """,
+            (finished_at, candidate_count, len(result_items), run_id),
+        )
+        db.execute(
+            """
+            INSERT INTO activity (id, kind, title, body, created_at)
+            VALUES (?, 'discovery', ?, ?, ?)
+            """,
+            (
+                str(uuid.uuid4()),
+                "Discovery search completed",
+                f"{len(result_items)} unique candidates from {len(queries)} searches.",
+                finished_at,
+            ),
+        )
+    return DiscoveryRunOut(
+        run_id=run_id,
+        queries=queries,
+        limit_per_query=preferences.discovery_limit_per_query,
+        results=result_items,
+    )
+
+
+def _finish_failed_discovery_run(run_id: str, error: str) -> None:
+    finished_at = utc_now()
+    with connect() as db:
+        db.execute(
+            "UPDATE discovery_runs SET status = 'failed', finished_at = ?, error = ? WHERE id = ?",
+            (finished_at, error[:500], run_id),
+        )
+        db.execute(
+            """
+            INSERT INTO activity (id, kind, title, body, created_at)
+            VALUES (?, 'discovery_error', 'Discovery search failed', ?, ?)
+            """,
+            (str(uuid.uuid4()), error[:500], finished_at),
+        )
+
+
+def _discovery_run_summary(row: Any) -> DiscoveryRunSummary:
+    return DiscoveryRunSummary(
+        id=row["id"],
+        trigger=row["trigger"],
+        status=row["status"],
+        started_at=row["started_at"],
+        finished_at=row["finished_at"],
+        queries=decode_json(row["queries_json"], []),
+        candidate_count=row["candidate_count"],
+        unique_count=row["unique_count"],
+        error=row["error"],
+    )
+
+
+def _next_discovery_run(schedule: DiscoveryScheduleConfig) -> str | None:
+    if not schedule.enabled:
+        return None
+    zone = ZoneInfo(schedule.timezone)
+    now = datetime.now(timezone.utc).astimezone(zone)
+    for day_offset in range(2):
+        day = now.date() + timedelta(days=day_offset)
+        for text in schedule.times:
+            hour, minute = (int(part) for part in text.split(":"))
+            candidate = datetime(day.year, day.month, day.day, hour, minute, tzinfo=zone)
+            if candidate > now:
+                return candidate.astimezone(timezone.utc).replace(microsecond=0).isoformat()
+    return None
+
+
+async def _discovery_scheduler() -> None:
+    while True:
+        await asyncio.sleep(20)
+        try:
+            await asyncio.to_thread(_run_due_discovery)
+        except Exception:
+            continue
+
+
+def _run_due_discovery() -> None:
+    with connect() as db:
+        config = db.execute("SELECT * FROM discovery_config WHERE id = 'default'").fetchone()
+        if config is None or not config["schedule_enabled"]:
+            return
+        zone = ZoneInfo(config["timezone"])
+        local_now = datetime.now(timezone.utc).astimezone(zone)
+        current_time = local_now.strftime("%H:%M")
+        times = decode_json(config["schedule_times_json"], [])
+        if current_time not in times:
+            return
+        slot = f"{local_now.date().isoformat()}T{current_time}@{config['timezone']}"
+        cursor = db.execute(
+            """
+            UPDATE discovery_config SET last_scheduled_slot = ?
+            WHERE id = 'default' AND (last_scheduled_slot IS NULL OR last_scheduled_slot != ?)
+            """,
+            (slot, slot),
+        )
+        reserved = cursor.rowcount == 1
+    if reserved:
+        _execute_discovery("scheduled")
 
 
 def _feedback_from_row(row: Any) -> FeedbackOut | None:
@@ -635,6 +896,7 @@ def _preferences_from_row(row: Any) -> Preferences:
         salary_target_max=row["salary_target_max"],
         acceptable_salary_min=row["acceptable_salary_min"],
         role_families=decode_json(row["role_families_json"], []),
+        priority_role_families=decode_json(row["priority_role_families_json"], []),
         priorities=decode_json(row["priorities_json"], []),
         hard_rules=decode_json(row["hard_rules_json"], []),
         discovery_queries=decode_json(row["discovery_queries_json"], []),
