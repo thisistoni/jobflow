@@ -131,6 +131,12 @@ class Preferences(BaseModel):
     manual_submission_only: bool = True
     updated_at: str | None = None
 
+    @model_validator(mode="after")
+    def require_manual_submission(self) -> "Preferences":
+        if not self.manual_submission_only:
+            raise ValueError("JobFlow requires explicit approval before external applications")
+        return self
+
 
 class ActivityItem(BaseModel):
     id: str
@@ -139,6 +145,16 @@ class ActivityItem(BaseModel):
     body: str = ""
     job_id: str | None = None
     created_at: str
+
+
+class DailyPulseItem(BaseModel):
+    date: str
+    count: int = Field(ge=0)
+
+
+class DashboardPulseOut(BaseModel):
+    days: list[DailyPulseItem]
+    today_count: int = Field(ge=0)
 
 
 class DiscoverySearchIn(BaseModel):

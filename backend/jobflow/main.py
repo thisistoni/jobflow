@@ -10,9 +10,11 @@ import secrets
 import time
 import uuid
 from contextlib import asynccontextmanager
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Literal
 from urllib.parse import urlsplit
+from zoneinfo import ZoneInfo
 
 from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
@@ -25,6 +27,8 @@ from .firecrawl import FirecrawlConfigError, FirecrawlProviderError, scrape_url,
 from .importer import _stable_id, canonicalize_url
 from .models import (
     ActivityItem,
+    DailyPulseItem,
+    DashboardPulseOut,
     DiscoveryRunOut,
     DiscoveryRunResult,
     DiscoveryScrapeIn,
@@ -542,6 +546,28 @@ def activity(limit: int = Query(50, ge=1, le=200)) -> list[ActivityItem]:
             (limit,),
         ).fetchall()
     return [ActivityItem(**dict(row)) for row in rows]
+
+
+@app.get("/api/dashboard/pulse", response_model=DashboardPulseOut)
+def dashboard_pulse(days: int = Query(20, ge=7, le=31)) -> DashboardPulseOut:
+    vienna = ZoneInfo("Europe/Vienna")
+    today = datetime.now(timezone.utc).astimezone(vienna).date()
+    first_day = today - timedelta(days=days - 1)
+    counts = {first_day + timedelta(days=index): 0 for index in range(days)}
+    with connect() as db:
+        rows = db.execute("SELECT first_seen_at FROM jobs").fetchall()
+    for row in rows:
+        try:
+            seen = datetime.fromisoformat(row["first_seen_at"].replace("Z", "+00:00"))
+        except (AttributeError, TypeError, ValueError):
+            continue
+        if seen.tzinfo is None:
+            seen = seen.replace(tzinfo=timezone.utc)
+        local_day = seen.astimezone(vienna).date()
+        if local_day in counts:
+            counts[local_day] += 1
+    pulse_days = [DailyPulseItem(date=day.isoformat(), count=count) for day, count in counts.items()]
+    return DashboardPulseOut(days=pulse_days, today_count=counts[today])
 
 
 def _feedback_from_row(row: Any) -> FeedbackOut | None:

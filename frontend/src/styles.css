@@ -1028,8 +1028,7 @@ textarea {
   background: var(--ink);
 }
 
-.decline-submit button,
-.sticky-submit button {
+.decline-submit button {
   width: 100%;
   height: 50px;
   border: 0;
@@ -1115,27 +1114,77 @@ textarea {
 .salary-track {
   position: relative;
   grid-column: 1 / -1;
-  height: 14px;
-  border-radius: 7px;
+  height: 30px;
+}
+
+.salary-rail,
+.salary-fill {
+  position: absolute;
+  top: 10px;
+  height: 10px;
+  border-radius: 5px;
+}
+
+.salary-rail {
+  inset-inline: 0;
   background: #b54a17;
 }
 
-.salary-track i {
-  display: block;
-  height: 100%;
-  border-radius: inherit;
+.salary-fill {
   background: var(--ink);
 }
 
-.salary-track b {
+.salary-range {
   position: absolute;
-  top: 50%;
+  inset: 0;
+  width: 100%;
+  height: 30px;
+  margin: 0;
+  appearance: none;
+  -webkit-appearance: none;
+  background: transparent;
+  pointer-events: none;
+}
+
+.salary-range-min {
+  z-index: 2;
+}
+
+.salary-range-max {
+  z-index: 3;
+}
+
+.salary-range::-webkit-slider-runnable-track {
+  height: 10px;
+  background: transparent;
+}
+
+.salary-range::-webkit-slider-thumb {
+  width: 20px;
+  height: 20px;
+  margin-top: -5px;
+  appearance: none;
+  -webkit-appearance: none;
+  border: 2px solid var(--ink);
+  border-radius: 50%;
+  background: var(--paper);
+  pointer-events: auto;
+  cursor: grab;
+}
+
+.salary-range::-moz-range-track {
+  height: 10px;
+  background: transparent;
+}
+
+.salary-range::-moz-range-thumb {
   width: 16px;
   height: 16px;
   border: 2px solid var(--ink);
   border-radius: 50%;
   background: var(--paper);
-  transform: translate(-50%, -50%);
+  pointer-events: auto;
+  cursor: grab;
 }
 
 .salary-inputs {
@@ -1143,6 +1192,13 @@ textarea {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 8px;
+}
+
+.salary-note {
+  grid-column: 1 / -1;
+  color: var(--brown);
+  font-size: 9px;
+  line-height: 13px;
 }
 
 .pref-section {
@@ -1249,6 +1305,74 @@ textarea {
   min-height: 76px;
 }
 
+.tag-editor {
+  display: grid;
+  gap: 7px;
+}
+
+.tag-editor-label {
+  color: var(--ink);
+  font-size: 9px;
+  font-weight: 800;
+}
+
+.tag-editor > small {
+  color: var(--muted);
+  font-size: 8px;
+}
+
+.tag-editor-box {
+  min-height: 76px;
+  display: flex;
+  align-content: flex-start;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+  padding: 10px;
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  background: #fffaf6;
+  cursor: text;
+}
+
+.keyword-tag {
+  min-height: 28px;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 4px 5px 4px 9px;
+  border-radius: 14px;
+  background: #ffe2d0;
+  color: #8a3105;
+  font-size: 9px;
+  font-weight: 800;
+}
+
+.keyword-tag button {
+  width: 20px;
+  height: 20px;
+  display: grid;
+  place-items: center;
+  padding: 0;
+  border: 0;
+  border-radius: 50%;
+  background: rgb(138 49 5 / 0.1);
+  color: inherit;
+}
+
+.tag-editor-box input {
+  flex: 1 1 130px;
+  min-width: 110px;
+  height: 30px;
+  padding: 0 4px;
+  border: 0;
+  background: transparent;
+}
+
+.tag-editor-box input:focus {
+  outline: 0;
+}
+
 .compact-editor textarea {
   min-height: 58px;
 }
@@ -1273,10 +1397,76 @@ textarea {
   border-radius: 4px;
 }
 
+.approval-boundary {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  align-items: start;
+  gap: 10px;
+  padding: 11px;
+  border: 1px solid var(--ink);
+  border-radius: 6px;
+  background: #fffaf6;
+}
+
+.approval-boundary > span:last-child {
+  display: grid;
+  gap: 3px;
+}
+
+.approval-boundary b {
+  font-size: 11px;
+}
+
+.approval-boundary small {
+  color: var(--muted);
+  font-size: 9px;
+  line-height: 13px;
+}
+
 .sticky-submit {
   margin-top: auto;
-  padding: 10px 16px 14px;
-  background: var(--paper);
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+  padding: 8px 16px 12px;
+  background: transparent;
+  pointer-events: none;
+}
+
+.sticky-submit button {
+  height: 44px;
+  border: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: white;
+  font-size: 10px;
+  font-weight: 800;
+  pointer-events: auto;
+  box-shadow: 0 4px 12px rgb(30 27 25 / 0.18);
+}
+
+.sticky-submit .save-preferences {
+  min-width: 108px;
+  gap: 7px;
+  padding: 0 18px;
+  border-radius: 22px;
+  background: var(--orange);
+}
+
+.sticky-submit .discard-preferences {
+  width: 44px;
+  border-radius: 50%;
+  background: var(--ink);
+}
+
+.save-error {
+  max-width: 150px;
+  color: #a51d16;
+  font-size: 8px;
+  font-weight: 700;
+  pointer-events: auto;
 }
 
 .pipeline-screen {

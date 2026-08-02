@@ -10,7 +10,7 @@ import {
   Check,
   Circle,
   Columns3,
-  Ellipsis,
+  ExternalLink,
   Inbox,
   ListFilter,
   LockKeyhole,
@@ -21,6 +21,7 @@ import {
   SlidersHorizontal,
   Sparkles,
   Target,
+  Trash2,
   UserRound,
   X
 } from "lucide-react";
@@ -116,6 +117,11 @@ type DiscoveryRun = {
   results: Array<{ url: string; title?: string | null; description?: string | null }>;
 };
 
+type DashboardPulse = {
+  days: Array<{ date: string; count: number }>;
+  today_count: number;
+};
+
 const filters: Array<{ id: Filter; label: string }> = [
   { id: "inbox", label: "For you" },
   { id: "maybe", label: "Review" },
@@ -138,6 +144,7 @@ function App() {
   const [view, setView] = React.useState<View>("inbox");
   const [activity, setActivity] = React.useState<ActivityItem[]>([]);
   const [preferences, setPreferences] = React.useState<Preferences | null>(null);
+  const [pulse, setPulse] = React.useState<DashboardPulse>({ days: [], today_count: 0 });
   const [loading, setLoading] = React.useState(true);
   const [discoveryRunning, setDiscoveryRunning] = React.useState(false);
   const [discoveryMessage, setDiscoveryMessage] = React.useState<string | null>(null);
@@ -155,6 +162,7 @@ function App() {
       setSelectedJob(null);
       setActivity([]);
       setPreferences(null);
+      setPulse({ days: [], today_count: 0 });
       setError(null);
       setDeclineOpen(false);
       return true;
@@ -192,6 +200,13 @@ function App() {
       })
       .finally(() => setLoading(false));
   }, [handleAuthExpired, isUnlocked, loadJobs]);
+
+  React.useEffect(() => {
+    if (!isUnlocked) return;
+    api<DashboardPulse>("/api/dashboard/pulse?days=20").then(setPulse).catch((reason: unknown) => {
+      if (!handleAuthExpired(reason)) setError(messageFrom(reason));
+    });
+  }, [handleAuthExpired, isUnlocked]);
 
   React.useEffect(() => {
     if (!isUnlocked) return;
@@ -264,7 +279,7 @@ function App() {
     }
   }
 
-  async function savePreferences(next: Preferences) {
+  async function savePreferences(next: Preferences): Promise<Preferences> {
     try {
       const updated = await api<Preferences>("/api/preferences", {
         method: "PUT",
@@ -273,8 +288,10 @@ function App() {
       });
       setPreferences(updated);
       setActivity(await api<ActivityItem[]>("/api/activity"));
+      return updated;
     } catch (reason) {
       if (!handleAuthExpired(reason)) setError(messageFrom(reason));
+      throw reason;
     }
   }
 
@@ -299,6 +316,7 @@ function App() {
       setSelectedJob(null);
       setActivity([]);
       setPreferences(null);
+      setPulse({ days: [], today_count: 0 });
       setMobileDetailOpen(false);
       setDeclineOpen(false);
     }
@@ -345,9 +363,16 @@ function App() {
       }}
     />
   ) : view === "activity" ? (
-    <ActivityView items={activity} jobs={jobs} />
+    <ActivityView
+      items={activity}
+      jobs={jobs}
+      onOpenSettings={() => {
+        navigate("preferences");
+        window.setTimeout(() => document.getElementById("search-automation")?.scrollIntoView({ behavior: "smooth" }), 0);
+      }}
+    />
   ) : preferences ? (
-    <PreferencesView preferences={preferences} onSave={(next) => void savePreferences(next)} />
+    <PreferencesView preferences={preferences} onSave={savePreferences} />
   ) : (
     <div className="state-card">Loading preferences...</div>
   );
@@ -376,6 +401,7 @@ function App() {
             loading={loading}
             discoveryRunning={discoveryRunning}
             discoveryMessage={discoveryMessage}
+            pulse={pulse}
             error={error}
             counts={{ inboxCount, strongCount }}
             onRefresh={() => void runDiscovery()}
@@ -408,6 +434,7 @@ function InboxScreen({
   loading,
   discoveryRunning,
   discoveryMessage,
+  pulse,
   error,
   counts,
   onRefresh,
@@ -422,6 +449,7 @@ function InboxScreen({
   loading: boolean;
   discoveryRunning: boolean;
   discoveryMessage: string | null;
+  pulse: DashboardPulse;
   error: string | null;
   counts: { inboxCount: number; strongCount: number };
   onRefresh: () => void;
@@ -452,13 +480,13 @@ function InboxScreen({
           </button>
         </div>
         <div className="daily-match">
-          <strong>{jobs.length.toString().padStart(2, "0")}</strong>
+          <strong>{pulse.today_count.toString().padStart(2, "0")}</strong>
           <div>
-            <h2>new roles found</h2>
+            <h2>new roles found today</h2>
             <p>{counts.strongCount} look unusually good for you</p>
           </div>
         </div>
-        <PulseBars />
+        <PulseBars days={pulse.days} />
       </header>
 
       <div className="screen-body inbox-body">
@@ -540,7 +568,7 @@ function JobReview({
           </button>
           <span className="micro orange-text">MATCH REVIEW</span>
           <a className="icon-button outlined" href={job.source_url} target="_blank" rel="noreferrer" aria-label="Open source job">
-            <Ellipsis size={18} />
+            <ExternalLink size={18} />
           </a>
         </div>
         <div className="company-line">
@@ -593,7 +621,7 @@ function JobReview({
 
       <footer className="review-actions">
         <button className="reject-action" type="button" onClick={onDecline} aria-label="Decline role">
-          <X size={19} />
+          <Trash2 size={18} />
         </button>
         <button className="revise-action" type="button" onClick={() => onFeedback("maybe", quickReasons.maybe.slice(0, 1), "")}>
           REVISE
@@ -754,12 +782,21 @@ function LoginScreen({
   );
 }
 
-function PreferencesView({ preferences, onSave }: { preferences: Preferences; onSave: (next: Preferences) => void }) {
-  const [draft, setDraft] = React.useState(preferences);
-  React.useEffect(() => setDraft(preferences), [preferences]);
+function PreferencesView({ preferences, onSave }: { preferences: Preferences; onSave: (next: Preferences) => Promise<Preferences> }) {
+  const initial = normalizeEditablePreferences(preferences);
+  const [draft, setDraft] = React.useState(initial);
+  const [baseline, setBaseline] = React.useState(initial);
+  const [saving, setSaving] = React.useState(false);
+  const [saveError, setSaveError] = React.useState<string | null>(null);
+  React.useEffect(() => {
+    const normalized = normalizeEditablePreferences(preferences);
+    setDraft(normalized);
+    setBaseline(normalized);
+    setSaveError(null);
+  }, [preferences]);
 
   function setList(key: keyof Preferences, value: string) {
-    setDraft({ ...draft, [key]: value.split("\n").map((item) => item.trim()).filter(Boolean) });
+    setDraft((current) => ({ ...current, [key]: value.split("\n").map((item) => item.trim()).filter(Boolean) }));
   }
 
   function toggleWorkMode(mode: string) {
@@ -776,8 +813,24 @@ function PreferencesView({ preferences, onSave }: { preferences: Preferences; on
     setDraft({ ...draft, hard_rules: nextRules });
   }
 
-  const salaryValue = draft.salary_target_min ?? draft.acceptable_salary_min ?? 0;
+  const salaryMin = boundedNumber(String(draft.salary_target_min ?? 50000), 30000, 120000, 50000);
+  const salaryMax = boundedNumber(String(draft.salary_target_max ?? 56000), 30000, 120000, 56000);
   const visibleRules = preferredRules(draft);
+  const isDirty = preferenceFingerprint(draft) !== preferenceFingerprint(baseline);
+
+  async function save() {
+    setSaving(true);
+    setSaveError(null);
+    try {
+      const saved = normalizeEditablePreferences(await onSave({ ...draft, manual_submission_only: true }));
+      setDraft(saved);
+      setBaseline(saved);
+    } catch (reason) {
+      setSaveError(messageFrom(reason));
+    } finally {
+      setSaving(false);
+    }
+  }
 
   return (
     <article className="preferences-screen">
@@ -801,28 +854,58 @@ function PreferencesView({ preferences, onSave }: { preferences: Preferences; on
       <div className="screen-body preferences-body">
         <section className="salary-card">
           <div>
-            <span className="micro">MINIMUM SALARY</span>
-            <strong>{formatCurrencyValue(salaryValue, draft.salary_currency)}</strong>
+            <span className="micro">TARGET RANGE</span>
+            <strong>{formatCurrencyValue(salaryMin, draft.salary_currency)}–{formatCurrencyValue(salaryMax, draft.salary_currency)}</strong>
           </div>
           <span className="micro">GROSS / YEAR</span>
           <div className="salary-track">
-            <i style={{ width: `${salaryPercent(salaryValue)}%` }} />
-            <b style={{ left: `${salaryPercent(salaryValue)}%` }} />
+            <span className="salary-rail" />
+            <span
+              className="salary-fill"
+              style={{ left: `${salaryPercent(salaryMin)}%`, right: `${100 - salaryPercent(salaryMax)}%` }}
+            />
+            <input
+              className="salary-range salary-range-min"
+              aria-label="Target minimum salary"
+              type="range"
+              min={30000}
+              max={120000}
+              step={1000}
+              value={salaryMin}
+              onChange={(event) => setDraft({ ...draft, salary_target_min: Math.min(Number(event.target.value), salaryMax) })}
+            />
+            <input
+              className="salary-range salary-range-max"
+              aria-label="Target maximum salary"
+              type="range"
+              min={30000}
+              max={120000}
+              step={1000}
+              value={salaryMax}
+              onChange={(event) => setDraft({ ...draft, salary_target_max: Math.max(Number(event.target.value), salaryMin) })}
+            />
           </div>
           <div className="salary-inputs">
             <input
               aria-label="Target minimum salary"
               type="number"
-              value={draft.salary_target_min ?? ""}
-              onChange={(event) => setDraft({ ...draft, salary_target_min: numberOrNull(event.target.value) })}
+              min={30000}
+              max={salaryMax}
+              step={1000}
+              value={salaryMin}
+              onChange={(event) => setDraft({ ...draft, salary_target_min: Math.min(boundedNumber(event.target.value, 30000, 120000, salaryMin), salaryMax) })}
             />
             <input
               aria-label="Target maximum salary"
               type="number"
-              value={draft.salary_target_max ?? ""}
-              onChange={(event) => setDraft({ ...draft, salary_target_max: numberOrNull(event.target.value) })}
+              min={salaryMin}
+              max={120000}
+              step={1000}
+              value={salaryMax}
+              onChange={(event) => setDraft({ ...draft, salary_target_max: Math.max(boundedNumber(event.target.value, 30000, 120000, salaryMax), salaryMin) })}
             />
           </div>
+          <p className="salary-note">Exceptional transition roles can still be considered from €47.5k.</p>
         </section>
 
         <section className="pref-section">
@@ -852,7 +935,7 @@ function PreferencesView({ preferences, onSave }: { preferences: Preferences; on
           {visibleRules.map((rule) => (
             <button className="rule-row" type="button" key={rule} onClick={() => toggleRule(rule)}>
               <span>
-                <b>{rule}</b>
+                <b>{humanizeRule(rule)}</b>
                 <small>{ruleMeta(rule)}</small>
               </span>
               <i className={draft.hard_rules.includes(rule) ? "on" : ""}><b /></i>
@@ -861,7 +944,11 @@ function PreferencesView({ preferences, onSave }: { preferences: Preferences; on
         </section>
 
         <EditorArea label="Target locations" value={draft.target_locations.join("\n")} onChange={(value) => setList("target_locations", value)} />
-        <EditorArea label="Role families" value={draft.role_families.join("\n")} onChange={(value) => setList("role_families", value)} />
+        <TagEditor
+          label="Roles & keywords"
+          values={draft.role_families}
+          onChange={(role_families) => setDraft({ ...draft, role_families })}
+        />
         <EditorArea label="Discovery queries" value={draft.discovery_queries.join("\n")} onChange={(value) => setList("discovery_queries", value)} />
 
         <section className="pref-section">
@@ -877,7 +964,7 @@ function PreferencesView({ preferences, onSave }: { preferences: Preferences; on
           <EditorArea label="Priorities" value={draft.priorities.join("\n")} onChange={(value) => setList("priorities", value)} compact />
         </section>
 
-        <section className="pref-section">
+        <section className="pref-section" id="search-automation">
           <h2>Discovery</h2>
           <label className="inline-field">
             <span>RESULTS PER QUERY</span>
@@ -889,17 +976,13 @@ function PreferencesView({ preferences, onSave }: { preferences: Preferences; on
               onChange={(event) => setDraft({ ...draft, discovery_limit_per_query: boundedNumber(event.target.value, 1, 20, 5) })}
             />
           </label>
-          <label className="rule-row checkbox-row">
+          <div className="approval-boundary">
+            <span className="company-mark dark"><LockKeyhole size={14} /></span>
             <span>
-              <b>External applications stay manual</b>
-              <small>Approval required</small>
+              <b>Applying requires your approval</b>
+              <small>JobFlow may prepare CVs and letters, but it never submits or contacts an employer without your approval.</small>
             </span>
-            <input
-              type="checkbox"
-              checked={draft.manual_submission_only}
-              onChange={(event) => setDraft({ ...draft, manual_submission_only: event.target.checked })}
-            />
-          </label>
+          </div>
         </section>
 
         <div className="learning-note">
@@ -908,11 +991,23 @@ function PreferencesView({ preferences, onSave }: { preferences: Preferences; on
         </div>
       </div>
 
-      <footer className="sticky-submit">
-        <button type="button" onClick={() => onSave(draft)}>
-          <Save size={16} /> SAVE PREFERENCES
-        </button>
-      </footer>
+      {isDirty ? (
+        <footer className="sticky-submit">
+          {saveError ? <span className="save-error">{saveError}</span> : null}
+          <button className="save-preferences" type="button" onClick={() => void save()} disabled={saving}>
+            <Save size={16} /> {saving ? "SAVING" : "SAVE"}
+          </button>
+          <button
+            className="discard-preferences"
+            type="button"
+            onClick={() => { setDraft(baseline); setSaveError(null); }}
+            disabled={saving}
+            aria-label="Discard unsaved preference changes"
+          >
+            <X size={16} />
+          </button>
+        </footer>
+      ) : null}
     </article>
   );
 }
@@ -967,9 +1062,9 @@ function PipelineView({ jobs, onSelect }: { jobs: JobListItem[]; onSelect: (id: 
   );
 }
 
-function ActivityView({ items, jobs }: { items: ActivityItem[]; jobs: JobListItem[] }) {
+function ActivityView({ items, jobs, onOpenSettings }: { items: ActivityItem[]; jobs: JobListItem[]; onOpenSettings: () => void }) {
   const packCount = jobs.filter((job) => job.status !== "bad").length;
-  const appliedCount = jobs.filter((job) => job.status === "good").length;
+  const likedCount = jobs.filter((job) => job.status === "good").length;
   return (
     <article className="activity-screen">
       <header className="activity-hero">
@@ -978,14 +1073,14 @@ function ActivityView({ items, jobs }: { items: ActivityItem[]; jobs: JobListIte
             <p className="micro">AGENT LOG</p>
             <h1>While you were away</h1>
           </div>
-          <span className="round-action black">
+          <button className="round-action black" type="button" onClick={onOpenSettings} aria-label="Open search automation settings">
             <Settings2 size={18} />
-          </span>
+          </button>
         </div>
         <div className="activity-stats">
           <Stat label="FOUND" value={String(jobs.length).padStart(2, "0")} dark />
           <Stat label="PACKS" value={String(packCount).padStart(2, "0")} />
-          <Stat label="APPLIED" value={String(appliedCount).padStart(2, "0")} />
+          <Stat label="LIKED" value={String(likedCount).padStart(2, "0")} />
         </div>
       </header>
 
@@ -1061,6 +1156,77 @@ function ListSection({ title, icon, items, empty }: { title: string; icon: React
   );
 }
 
+function TagEditor({ label, values, onChange }: { label: string; values: string[]; onChange: (values: string[]) => void }) {
+  const [input, setInput] = React.useState("");
+  const inputRef = React.useRef<HTMLInputElement>(null);
+
+  React.useEffect(() => {
+    if (document.activeElement !== inputRef.current) return;
+    window.requestAnimationFrame(() => inputRef.current?.closest(".tag-editor")?.scrollIntoView({ block: "center" }));
+  }, [values.length]);
+
+  function addTags(candidates: string[]) {
+    const next = [...values];
+    for (const candidate of candidates) {
+      const value = candidate.trim();
+      if (value && !next.some((existing) => existing.toLocaleLowerCase() === value.toLocaleLowerCase())) next.push(value);
+    }
+    onChange(next);
+  }
+
+  function commit() {
+    if (!input.trim()) return;
+    addTags(input.split(/[;,]/));
+    setInput("");
+  }
+
+  return (
+    <div className="tag-editor">
+      <span className="tag-editor-label">{label.toUpperCase()}</span>
+      <div className="tag-editor-box" onClick={(event) => (event.currentTarget.querySelector("input") as HTMLInputElement | null)?.focus()}>
+        {values.map((value) => (
+          <span className="keyword-tag" key={value}>
+            {value}
+            <button type="button" onClick={() => onChange(values.filter((item) => item !== value))} aria-label={`Remove ${value}`}>
+              <X size={11} />
+            </button>
+          </span>
+        ))}
+        <input
+          ref={inputRef}
+          aria-label={`Add ${label.toLowerCase()}`}
+          placeholder={values.length ? "Add another…" : "Type a role or keyword…"}
+          value={input}
+          onChange={(event) => {
+            const next = event.target.value;
+            if (/[;,]/.test(next)) {
+              const parts = next.split(/[;,]/);
+              addTags(parts.slice(0, -1));
+              setInput(parts.at(-1) ?? "");
+            } else {
+              setInput(next);
+            }
+          }}
+          onBlur={commit}
+          onFocus={(event) => {
+            const editor = event.currentTarget.closest(".tag-editor");
+            window.requestAnimationFrame(() => editor?.scrollIntoView({ block: "center" }));
+          }}
+          onKeyDown={(event) => {
+            if (event.key === "Enter" || event.key === ";" || event.key === ",") {
+              event.preventDefault();
+              commit();
+            } else if (event.key === "Backspace" && !input && values.length) {
+              onChange(values.slice(0, -1));
+            }
+          }}
+        />
+      </div>
+      <small>Press Enter, comma, or semicolon to create a tag.</small>
+    </div>
+  );
+}
+
 function EditorArea({ label, value, onChange, compact = false }: { label: string; value: string; onChange: (value: string) => void; compact?: boolean }) {
   return (
     <label className={compact ? "editor-area compact-editor" : "editor-area"}>
@@ -1131,12 +1297,20 @@ function MobileDock({ activeView, onNavigate }: { activeView: View; onNavigate: 
   );
 }
 
-function PulseBars() {
+function PulseBars({ days = [] }: { days?: Array<{ date: string; count: number }> }) {
+  const fallback = [3, 5, 8, 4, 7, 6, 8, 3, 5, 8, 6, 4, 7, 8, 5, 3, 6, 8, 4, 7];
+  const maximum = Math.max(1, ...days.map((day) => day.count));
   return (
-    <div className="pulse-bars" aria-hidden="true">
-      {[3, 5, 8, 4, 7, 6, 8, 3, 5, 8, 6, 4, 7, 8, 5, 3, 6, 8, 4, 7].map((height, index) => (
-        <span key={`${height}-${index}`} style={{ height }} className={height > 6 ? "hot" : ""} />
-      ))}
+    <div
+      className="pulse-bars"
+      aria-hidden={days.length ? undefined : true}
+      aria-label={days.length ? "Jobs discovered each day over the last 20 days" : undefined}
+      role={days.length ? "img" : undefined}
+    >
+      {(days.length ? days : fallback.map((height, index) => ({ date: String(index), count: height }))).map((day) => {
+        const height = days.length ? 3 + Math.round((day.count / maximum) * 5) : day.count;
+        return <span key={day.date} title={days.length ? `${day.date}: ${day.count} found` : undefined} style={{ height }} className={day.count / maximum >= 0.7 ? "hot" : ""} />;
+      })}
     </div>
   );
 }
@@ -1237,21 +1411,51 @@ function formatCurrencyValue(value: number, currency: string) {
 }
 
 function salaryPercent(value: number) {
-  if (!value) return 46;
-  return Math.min(92, Math.max(12, ((value - 30000) / 120000) * 100));
+  if (!value) return 0;
+  return Math.min(100, Math.max(0, ((value - 30000) / 90000) * 100));
 }
 
 function preferredRules(preferences: Preferences) {
-  const defaults = ["Remote within EU", "Senior or lead", "Product companies"];
-  const merged = [...defaults, ...preferences.hard_rules];
-  return Array.from(new Set(merged)).slice(0, 5);
+  return preferences.hard_rules.filter((rule) => !isInternalPolicyRule(rule)).slice(0, 5);
 }
 
 function ruleMeta(rule: string) {
-  if (/remote/i.test(rule)) return "No relocation";
-  if (/senior|lead/i.test(rule)) return "Skip junior roles";
-  if (/product/i.test(rule)) return "Agencies are okay";
-  return "Hard filter";
+  if (/home.?office/i.test(rule)) return "Required work setup";
+  if (/german/i.test(rule)) return "Preferred language environment";
+  if (/vienna|wien/i.test(rule)) return "Required commute area";
+  return "Required condition";
+}
+
+function isInternalPolicyRule(rule: string) {
+  return /normally reject below|application.*approval|manual submission|recruiter contact/i.test(rule);
+}
+
+function humanizeRule(rule: string) {
+  return rule.includes("_") ? humanize(rule) : rule;
+}
+
+function humanizeRole(value: string) {
+  const trimmed = value.trim();
+  if (!trimmed.includes("_")) return trimmed;
+  const acronyms: Record<string, string> = { ai: "AI", it: "IT", rpa: "RPA", ui: "UI", ux: "UX", qa: "QA" };
+  const words = trimmed.split("_").filter(Boolean).map((word) => acronyms[word.toLowerCase()] ?? word.toLowerCase());
+  if (!words.length) return trimmed;
+  words[0] = acronyms[words[0].toLowerCase()] ?? `${words[0].charAt(0).toUpperCase()}${words[0].slice(1)}`;
+  return words.join(" ");
+}
+
+function normalizeEditablePreferences(preferences: Preferences): Preferences {
+  return {
+    ...preferences,
+    role_families: Array.from(new Set(preferences.role_families.map(humanizeRole).filter(Boolean))),
+    hard_rules: preferences.hard_rules.filter((rule) => !isInternalPolicyRule(rule)),
+    manual_submission_only: true
+  };
+}
+
+function preferenceFingerprint(preferences: Preferences) {
+  const { updated_at: _updatedAt, ...comparable } = preferences;
+  return JSON.stringify(comparable);
 }
 
 function numberOrNull(value: string) {
