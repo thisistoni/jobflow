@@ -9,6 +9,8 @@ import {
   Circle,
   Inbox,
   ListFilter,
+  LockKeyhole,
+  LogOut,
   MessageSquareText,
   RefreshCw,
   Save,
@@ -24,6 +26,12 @@ import "./styles.css";
 type Rating = "good" | "maybe" | "bad";
 type View = "inbox" | "activity" | "preferences";
 type Filter = "inbox" | "strong" | "maybe" | "low" | "reviewed" | "all";
+
+type AuthStatus = {
+  auth_required: boolean;
+  authenticated: boolean;
+  expires_at?: number | null;
+};
 
 type Feedback = {
   rating: Rating;
@@ -115,6 +123,7 @@ const quickReasons: Record<Rating, string[]> = {
 };
 
 function App() {
+  const [auth, setAuth] = React.useState<AuthStatus | null>(null);
   const [jobs, setJobs] = React.useState<JobListItem[]>([]);
   const [selectedId, setSelectedId] = React.useState<string | null>(null);
   const [selectedJob, setSelectedJob] = React.useState<JobDetail | null>(null);
@@ -125,6 +134,28 @@ function App() {
   const [loading, setLoading] = React.useState(true);
   const [error, setError] = React.useState<string | null>(null);
   const [mobileDetailOpen, setMobileDetailOpen] = React.useState(false);
+  const isUnlocked = auth != null && (!auth.auth_required || auth.authenticated);
+
+  const handleAuthExpired = React.useCallback((reason: unknown) => {
+    if (reason instanceof AuthExpiredError) {
+      setAuth({ auth_required: true, authenticated: false });
+      setJobs([]);
+      setSelectedId(null);
+      setSelectedJob(null);
+      setActivity([]);
+      setPreferences(null);
+      setError(null);
+      return true;
+    }
+    return false;
+  }, []);
+
+  React.useEffect(() => {
+    api<AuthStatus>("/api/auth/status")
+      .then(setAuth)
+      .catch((reason: unknown) => setError(messageFrom(reason)))
+      .finally(() => setLoading(false));
+  }, []);
 
   const loadJobs = React.useCallback(async () => {
     setError(null);
@@ -134,54 +165,105 @@ function App() {
   }, [filter]);
 
   React.useEffect(() => {
+    if (!isUnlocked) return;
     setLoading(true);
     loadJobs()
-      .catch((reason: unknown) => setError(messageFrom(reason)))
+      .catch((reason: unknown) => {
+        if (!handleAuthExpired(reason)) setError(messageFrom(reason));
+      })
       .finally(() => setLoading(false));
-  }, [loadJobs]);
+  }, [handleAuthExpired, isUnlocked, loadJobs]);
 
   React.useEffect(() => {
+    if (!isUnlocked) return;
     if (!selectedId) {
       setSelectedJob(null);
       return;
     }
     api<JobDetail>(`/api/jobs/${selectedId}`)
       .then(setSelectedJob)
-      .catch((reason: unknown) => setError(messageFrom(reason)));
-  }, [selectedId]);
+      .catch((reason: unknown) => {
+        if (!handleAuthExpired(reason)) setError(messageFrom(reason));
+      });
+  }, [handleAuthExpired, isUnlocked, selectedId]);
 
   React.useEffect(() => {
+    if (!isUnlocked) return;
     if (view === "activity") {
-      api<ActivityItem[]>("/api/activity").then(setActivity).catch((reason: unknown) => setError(messageFrom(reason)));
+      api<ActivityItem[]>("/api/activity").then(setActivity).catch((reason: unknown) => {
+        if (!handleAuthExpired(reason)) setError(messageFrom(reason));
+      });
     }
     if (view === "preferences") {
-      api<Preferences>("/api/preferences").then(setPreferences).catch((reason: unknown) => setError(messageFrom(reason)));
+      api<Preferences>("/api/preferences").then(setPreferences).catch((reason: unknown) => {
+        if (!handleAuthExpired(reason)) setError(messageFrom(reason));
+      });
     }
-  }, [view]);
+  }, [handleAuthExpired, isUnlocked, view]);
 
   const inboxCount = jobs.filter((job) => job.status === "inbox").length;
   const strongCount = jobs.filter((job) => (job.score ?? 0) >= 70).length;
 
   async function submitFeedback(rating: Rating, reasons: string[], note: string) {
     if (!selectedJob) return;
-    const feedback = await api<Feedback>(`/api/jobs/${selectedJob.id}/feedback`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ rating, reasons, note })
-    });
-    setSelectedJob({ ...selectedJob, status: rating, feedback });
-    await loadJobs();
-    setActivity(await api<ActivityItem[]>("/api/activity"));
+    try {
+      const feedback = await api<Feedback>(`/api/jobs/${selectedJob.id}/feedback`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ rating, reasons, note })
+      });
+      setSelectedJob({ ...selectedJob, status: rating, feedback });
+      await loadJobs();
+      setActivity(await api<ActivityItem[]>("/api/activity"));
+    } catch (reason) {
+      if (!handleAuthExpired(reason)) setError(messageFrom(reason));
+    }
   }
 
   async function savePreferences(next: Preferences) {
-    const updated = await api<Preferences>("/api/preferences", {
-      method: "PUT",
+    try {
+      const updated = await api<Preferences>("/api/preferences", {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(next)
+      });
+      setPreferences(updated);
+      setActivity(await api<ActivityItem[]>("/api/activity"));
+    } catch (reason) {
+      if (!handleAuthExpired(reason)) setError(messageFrom(reason));
+    }
+  }
+
+  async function submitLogin(username: string, password: string) {
+    const status = await api<AuthStatus>("/api/auth/login", {
+      method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(next)
+      body: JSON.stringify({ username, password })
     });
-    setPreferences(updated);
-    setActivity(await api<ActivityItem[]>("/api/activity"));
+    setAuth(status);
+    setError(null);
+  }
+
+  async function logout() {
+    try {
+      await api<AuthStatus>("/api/auth/logout", { method: "POST" });
+    } finally {
+      setAuth({ auth_required: true, authenticated: false });
+      setJobs([]);
+      setSelectedId(null);
+      setSelectedJob(null);
+      setActivity([]);
+      setPreferences(null);
+      setMobileDetailOpen(false);
+    }
+  }
+
+  if (auth == null) {
+    return <LoginScreen loading={loading} error={error} onLogin={submitLogin} />;
+  }
+
+  if (auth.auth_required && !auth.authenticated) {
+    return <LoginScreen error={error} onLogin={submitLogin} />;
   }
 
   return (
@@ -203,6 +285,11 @@ function App() {
             <button className="round-action" type="button" onClick={() => void loadJobs()} aria-label="Refresh jobs">
               <RefreshCw size={18} />
             </button>
+            {auth.auth_required ? (
+              <button className="round-action secondary" type="button" onClick={() => void logout()} aria-label="Log out">
+                <LogOut size={18} />
+              </button>
+            ) : null}
             <div className="hero-metrics">
               <div className="hero-metric">
                 <strong>{jobs.length}</strong>
@@ -380,6 +467,74 @@ function JobReview({
         </button>
       </section>
     </article>
+  );
+}
+
+function LoginScreen({
+  loading = false,
+  error,
+  onLogin
+}: {
+  loading?: boolean;
+  error: string | null;
+  onLogin: (username: string, password: string) => Promise<void>;
+}) {
+  const [username, setUsername] = React.useState("");
+  const [password, setPassword] = React.useState("");
+  const [submitting, setSubmitting] = React.useState(false);
+  const [loginError, setLoginError] = React.useState<string | null>(null);
+
+  async function submit(event: React.FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    setSubmitting(true);
+    setLoginError(null);
+    try {
+      await onLogin(username, password);
+    } catch (reason) {
+      setLoginError(messageFrom(reason));
+    } finally {
+      setSubmitting(false);
+    }
+  }
+
+  return (
+    <main className="login-shell">
+      <section className="login-panel" aria-label="JobFlow login">
+        <div className="brand-mark">JF</div>
+        <div>
+          <p className="kicker">LOCAL JOBFLOW</p>
+          <h1>Sign in</h1>
+        </div>
+        <form onSubmit={(event) => void submit(event)}>
+          <label>
+            Username
+            <input
+              autoComplete="username"
+              autoFocus
+              required
+              value={username}
+              onChange={(event) => setUsername(event.target.value)}
+              disabled={loading || submitting}
+            />
+          </label>
+          <label>
+            Password
+            <input
+              autoComplete="current-password"
+              type="password"
+              required
+              value={password}
+              onChange={(event) => setPassword(event.target.value)}
+              disabled={loading || submitting}
+            />
+          </label>
+          {error || loginError ? <div className="state-card error">{loginError ?? error}</div> : null}
+          <button className="primary-action" type="submit" disabled={loading || submitting}>
+            <LockKeyhole size={18} /> {loading ? "Checking session..." : submitting ? "Signing in..." : "Sign in"}
+          </button>
+        </form>
+      </section>
+    </main>
   );
 }
 
@@ -594,11 +749,33 @@ function EmptyDetail() {
 }
 
 async function api<T>(path: string, init?: RequestInit): Promise<T> {
-  const response = await fetch(path, init);
+  const response = await fetch(path, { credentials: "same-origin", ...init });
   if (!response.ok) {
-    throw new Error(`${response.status} ${response.statusText}`);
+    const detail = await errorDetail(response);
+    if (response.status === 401) {
+      throw new AuthExpiredError(detail);
+    }
+    throw new Error(detail || `${response.status} ${response.statusText}`);
   }
   return (await response.json()) as T;
+}
+
+class AuthExpiredError extends Error {
+  constructor(message: string) {
+    super(message || "Session expired");
+    this.name = "AuthExpiredError";
+  }
+}
+
+async function errorDetail(response: Response) {
+  const body = await response.text();
+  if (!body) return `${response.status} ${response.statusText}`;
+  try {
+    const parsed = JSON.parse(body) as { detail?: unknown };
+    return typeof parsed.detail === "string" ? parsed.detail : body;
+  } catch {
+    return body;
+  }
 }
 
 function initial(value: string) {

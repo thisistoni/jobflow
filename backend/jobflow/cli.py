@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import base64
 import json
 import os
 import sys
@@ -13,14 +14,16 @@ from urllib.request import Request, urlopen
 
 DEFAULT_BASE_URL = "http://127.0.0.1:8000"
 BASE_URL_ENV = "JOBFLOW_URL"
+AUTH_USERNAME_ENV = "JOBFLOW_AUTH_USERNAME"
+AUTH_PASSWORD_ENV = "JOBFLOW_AUTH_PASSWORD"
 JOB_FILTERS = ["inbox", "strong", "maybe", "low", "reviewed", "unanalyzed", "all"]
 
 
 def main() -> int:
     parser = build_parser()
     args = parser.parse_args()
-    client = Client(args.base_url)
     try:
+        client = Client(args.base_url)
         result = dispatch(args, client)
     except CliError as exc:
         print(str(exc), file=sys.stderr)
@@ -125,10 +128,13 @@ def dispatch(args: argparse.Namespace, client: "Client") -> Any:
 class Client:
     def __init__(self, base_url: str) -> None:
         self.base_url = base_url.rstrip("/")
+        self.auth_header = basic_auth_header_from_env()
 
     def request(self, method: str, path: str, payload: Any | None = None) -> Any:
         data = None
         headers = {"Accept": "application/json"}
+        if self.auth_header is not None:
+            headers["Authorization"] = self.auth_header
         if payload is not None:
             data = json.dumps(payload).encode("utf-8")
             headers["Content-Type"] = "application/json"
@@ -147,6 +153,17 @@ class Client:
             return json.loads(body)
         except json.JSONDecodeError as exc:
             raise CliError(f"Response was not valid JSON: {body}") from exc
+
+
+def basic_auth_header_from_env() -> str | None:
+    username = os.environ.get(AUTH_USERNAME_ENV)
+    password = os.environ.get(AUTH_PASSWORD_ENV)
+    if bool(username) != bool(password):
+        raise CliError(f"{AUTH_USERNAME_ENV} and {AUTH_PASSWORD_ENV} must both be set for CLI Basic auth")
+    if not username and not password:
+        return None
+    token = base64.b64encode(f"{username}:{password}".encode("utf-8")).decode("ascii")
+    return f"Basic {token}"
 
 
 def read_json(path: str) -> Any:

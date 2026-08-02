@@ -2,8 +2,12 @@ from __future__ import annotations
 
 import base64
 import binascii
+import hashlib
+import hmac
+import json
 import os
 import secrets
+import time
 import uuid
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -14,6 +18,7 @@ from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
+from pydantic import BaseModel
 
 from .database import connect, decode_json, encode_json, init_db, utc_now
 from .firecrawl import FirecrawlConfigError, FirecrawlProviderError, scrape_url, search_web
@@ -38,12 +43,17 @@ from .models import (
 
 AUTH_USERNAME_ENV = "JOBFLOW_AUTH_USERNAME"
 AUTH_PASSWORD_ENV = "JOBFLOW_AUTH_PASSWORD"
+AUTH_COOKIE_SECURE_ENV = "JOBFLOW_AUTH_COOKIE_SECURE"
+AUTH_COOKIE_NAME = "jobflow_session"
+AUTH_COOKIE_MAX_AGE_SECONDS = 7 * 24 * 60 * 60
 STATIC_DIR_ENV = "JOBFLOW_STATIC_DIR"
+OPEN_AUTH_API_PATHS = {"/api/auth/status", "/api/auth/login", "/api/auth/logout"}
 
 
 @asynccontextmanager
 async def lifespan(_: FastAPI):
     _auth_config()
+    _cookie_secure()
     init_db()
     yield
 
@@ -59,31 +69,80 @@ app.add_middleware(
 
 
 @app.middleware("http")
-async def basic_auth(request: Request, call_next: Any) -> Any:
-    if request.method == "GET" and request.url.path == "/health":
+async def app_auth(request: Request, call_next: Any) -> Any:
+    path = request.url.path
+    if path == "/health" or not _is_api_path(path) or path in OPEN_AUTH_API_PATHS:
         return await call_next(request)
 
     config = _auth_config()
     if config is None:
         return await call_next(request)
 
-    credentials = _decode_basic_auth(request.headers.get("Authorization"))
-    if credentials is None:
-        return _auth_challenge()
-
-    expected_username, expected_password = config
-    username, password = credentials
-    username_matches = secrets.compare_digest(username.encode("utf-8"), expected_username.encode("utf-8"))
-    password_matches = secrets.compare_digest(password.encode("utf-8"), expected_password.encode("utf-8"))
-    if not (username_matches and password_matches):
-        return _auth_challenge()
+    if not (_valid_basic_auth(request.headers.get("Authorization"), config) or _valid_session(request, config) is not None):
+        return _auth_unauthorized()
 
     return await call_next(request)
+
+
+class AuthLoginIn(BaseModel):
+    username: str
+    password: str
+
+
+class AuthStatusOut(BaseModel):
+    auth_required: bool
+    authenticated: bool
+    expires_at: int | None = None
 
 
 @app.get("/health")
 def health() -> dict[str, str]:
     return {"status": "ok"}
+
+
+@app.get("/api/auth/status", response_model=AuthStatusOut)
+def auth_status(request: Request) -> AuthStatusOut:
+    config = _auth_config()
+    if config is None:
+        return AuthStatusOut(auth_required=False, authenticated=True)
+    expires_at = _valid_session(request, config)
+    return AuthStatusOut(
+        auth_required=True,
+        authenticated=expires_at is not None or _valid_basic_auth(request.headers.get("Authorization"), config),
+        expires_at=expires_at,
+    )
+
+
+@app.post("/api/auth/login", response_model=AuthStatusOut)
+def auth_login(payload: AuthLoginIn) -> JSONResponse | AuthStatusOut:
+    config = _auth_config()
+    if config is None:
+        return AuthStatusOut(auth_required=False, authenticated=True)
+    if not _credentials_match(payload.username, payload.password, config):
+        return _auth_unauthorized("Invalid username or password")
+
+    expires_at = int(time.time()) + AUTH_COOKIE_MAX_AGE_SECONDS
+    response = JSONResponse(
+        AuthStatusOut(auth_required=True, authenticated=True, expires_at=expires_at).model_dump(),
+    )
+    response.set_cookie(
+        AUTH_COOKIE_NAME,
+        _encode_session(payload.username, expires_at, config),
+        max_age=AUTH_COOKIE_MAX_AGE_SECONDS,
+        httponly=True,
+        secure=_cookie_secure(),
+        samesite="strict",
+        path="/",
+    )
+    return response
+
+
+@app.post("/api/auth/logout", response_model=AuthStatusOut)
+def auth_logout() -> JSONResponse:
+    config = _auth_config()
+    response = JSONResponse(AuthStatusOut(auth_required=config is not None, authenticated=False).model_dump())
+    response.delete_cookie(AUTH_COOKIE_NAME, path="/", secure=_cookie_secure(), samesite="strict")
+    return response
 
 
 @app.get("/api/jobs", response_model=list[JobListItem])
@@ -592,6 +651,25 @@ def _auth_config() -> tuple[str, str] | None:
     return username, password
 
 
+def _is_api_path(path: str) -> bool:
+    return path == "/api" or path.startswith("/api/")
+
+
+def _valid_basic_auth(header: str | None, config: tuple[str, str]) -> bool:
+    credentials = _decode_basic_auth(header)
+    if credentials is None:
+        return False
+    username, password = credentials
+    return _credentials_match(username, password, config)
+
+
+def _credentials_match(username: str, password: str, config: tuple[str, str]) -> bool:
+    expected_username, expected_password = config
+    username_matches = secrets.compare_digest(username.encode("utf-8"), expected_username.encode("utf-8"))
+    password_matches = secrets.compare_digest(password.encode("utf-8"), expected_password.encode("utf-8"))
+    return username_matches and password_matches
+
+
 def _decode_basic_auth(header: str | None) -> tuple[str, str] | None:
     if not header or not header.startswith("Basic "):
         return None
@@ -605,12 +683,62 @@ def _decode_basic_auth(header: str | None) -> tuple[str, str] | None:
     return username, password
 
 
-def _auth_challenge() -> JSONResponse:
-    return JSONResponse(
-        {"detail": "Authentication required"},
-        status_code=401,
-        headers={"WWW-Authenticate": 'Basic realm="JobFlow"'},
-    )
+def _encode_session(username: str, expires_at: int, config: tuple[str, str]) -> str:
+    payload = json.dumps({"exp": expires_at, "u": username}, separators=(",", ":"), sort_keys=True).encode("utf-8")
+    body = _b64url_encode(payload)
+    signature = _sign_session_body(body, config)
+    return f"{body}.{signature}"
+
+
+def _valid_session(request: Request, config: tuple[str, str]) -> int | None:
+    token = request.cookies.get(AUTH_COOKIE_NAME)
+    if not token:
+        return None
+    body, separator, signature = token.partition(".")
+    if not separator or not body or not signature:
+        return None
+    expected_signature = _sign_session_body(body, config)
+    if not hmac.compare_digest(signature, expected_signature):
+        return None
+    try:
+        payload = json.loads(_b64url_decode(body).decode("utf-8"))
+    except (binascii.Error, UnicodeDecodeError, json.JSONDecodeError):
+        return None
+    if payload.get("u") != config[0]:
+        return None
+    expires_at = payload.get("exp")
+    if not isinstance(expires_at, int) or expires_at <= int(time.time()):
+        return None
+    return expires_at
+
+
+def _sign_session_body(body: str, config: tuple[str, str]) -> str:
+    return _b64url_encode(hmac.new(_session_secret(config), body.encode("ascii"), hashlib.sha256).digest())
+
+
+def _session_secret(config: tuple[str, str]) -> bytes:
+    return f"{config[0]}\0{config[1]}".encode("utf-8")
+
+
+def _b64url_encode(value: bytes) -> str:
+    return base64.urlsafe_b64encode(value).decode("ascii").rstrip("=")
+
+
+def _b64url_decode(value: str) -> bytes:
+    return base64.urlsafe_b64decode(value + "=" * (-len(value) % 4))
+
+
+def _cookie_secure() -> bool:
+    raw = os.environ.get(AUTH_COOKIE_SECURE_ENV, "false").strip().lower()
+    if raw in {"1", "true", "yes", "on"}:
+        return True
+    if raw in {"", "0", "false", "no", "off"}:
+        return False
+    raise RuntimeError(f"{AUTH_COOKIE_SECURE_ENV} must be true or false")
+
+
+def _auth_unauthorized(detail: str = "Authentication required") -> JSONResponse:
+    return JSONResponse({"detail": detail}, status_code=401)
 
 
 def _mount_static_files() -> None:

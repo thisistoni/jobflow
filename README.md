@@ -43,6 +43,7 @@ docker run --rm \
   -v jobflow-data:/data \
   -e JOBFLOW_AUTH_USERNAME=replace-with-username \
   -e JOBFLOW_AUTH_PASSWORD=replace-with-password \
+  -e JOBFLOW_AUTH_COOKIE_SECURE=false \
   -e FIRECRAWL_API_URL=https://replace-with-firecrawl-url \
   -e FIRECRAWL_API_KEY=replace-with-firecrawl-api-key \
   jobflow:local
@@ -66,6 +67,8 @@ JOBFLOW_PORT=8088
 
 The container serves the built PWA and API from the same FastAPI process. It stores SQLite data in `/data/jobflow.sqlite3`, backed by the `jobflow-data` named volume.
 
+The Compose example runs over plain HTTP, so it sets `JOBFLOW_AUTH_COOKIE_SECURE=false`. Set `JOBFLOW_AUTH_COOKIE_SECURE=true` when JobFlow is served behind HTTPS.
+
 Back up the named volume:
 
 ```bash
@@ -78,9 +81,13 @@ docker run --rm \
 
 ## Authentication
 
-HTTP Basic auth is optional. If neither `JOBFLOW_AUTH_USERNAME` nor `JOBFLOW_AUTH_PASSWORD` is set, the app does not require credentials. If one is set without the other, startup fails with a clear configuration error.
+Authentication is optional. If neither `JOBFLOW_AUTH_USERNAME` nor `JOBFLOW_AUTH_PASSWORD` is set, the app and API do not require credentials. If one is set without the other, startup fails with a clear configuration error.
 
-When both are set, every route is protected, including the PWA, except `GET /health`. Failed or missing credentials return `401` with `WWW-Authenticate: Basic realm="JobFlow"`.
+When both are set, the PWA shell and static assets still load, then the app shows a JobFlow login screen. The login posts to `/api/auth/login` and stores a stdlib HMAC-signed, expiring, `HttpOnly`, `SameSite=Strict` session cookie. The default session lifetime is 7 days.
+
+Protected API routes return JSON `401` responses and never emit `WWW-Authenticate`, so browsers do not show a native Basic Auth modal. `GET /health`, `GET /api/auth/status`, `POST /api/auth/login`, and `POST /api/auth/logout` stay open.
+
+Agent clients may still authenticate API requests with HTTP Basic by sending `Authorization: Basic ...`; the server accepts valid Basic credentials without ever challenging for them. The `jobflow` CLI adds this header automatically when both `JOBFLOW_AUTH_USERNAME` and `JOBFLOW_AUTH_PASSWORD` are set in its environment, and fails clearly if only one is set.
 
 ## Data
 
@@ -114,6 +121,8 @@ export FIRECRAWL_API_URL=https://api.firecrawl.dev
 ## Agent CLI
 
 The `jobflow` command talks to the running HTTP API. It does not access SQLite directly. Set `JOBFLOW_URL` to override the default `http://127.0.0.1:8000`.
+
+If API auth is enabled, set both `JOBFLOW_AUTH_USERNAME` and `JOBFLOW_AUTH_PASSWORD` for the CLI process so it can send non-challenging Basic credentials.
 
 ```bash
 jobflow status

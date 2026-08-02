@@ -22,3 +22,5 @@ jobflow jobs ingest --file job.json
 jobflow jobs analyze <job_id> --file analysis.json
 jobflow feedback set <job_id> --rating good --reason "Strong fit"
 ```
+
+When API auth is enabled, set both `JOBFLOW_AUTH_USERNAME` and `JOBFLOW_AUTH_PASSWORD` for CLI calls. The CLI sends HTTP Basic credentials for agents; browser login uses the app-managed session cookie.
