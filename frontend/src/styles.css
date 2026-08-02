@@ -18,10 +18,13 @@
 
 * {
   box-sizing: border-box;
+  -webkit-tap-highlight-color: transparent;
 }
 
 html {
   background: var(--warm);
+  overscroll-behavior: none;
+  touch-action: manipulation;
 }
 
 body {
@@ -29,6 +32,9 @@ body {
   min-width: 320px;
   min-height: 100vh;
   overflow-x: hidden;
+  overscroll-behavior: none;
+  touch-action: manipulation;
+  -webkit-text-size-adjust: 100%;
   background: var(--warm);
 }
 
@@ -40,6 +46,9 @@ textarea {
 
 button {
   cursor: pointer;
+  user-select: none;
+  -webkit-user-select: none;
+  -webkit-touch-callout: none;
 }
 
 button:disabled,
@@ -338,6 +347,23 @@ textarea {
   color: white;
 }
 
+.round-action.is-running svg {
+  animation: discovery-spin 0.9s linear infinite;
+}
+
+.discovery-status {
+  padding: 10px 12px;
+  border-radius: 8px;
+  background: var(--ink);
+  color: white;
+  font-size: 10px;
+  font-weight: 700;
+}
+
+@keyframes discovery-spin {
+  to { transform: rotate(360deg); }
+}
+
 .featured-job {
   width: 100%;
   display: flex;
@@ -548,6 +574,7 @@ textarea {
 
 .review-screen,
 .preferences-screen,
+.pipeline-screen,
 .activity-screen,
 .decline-screen,
 .login-screen {
@@ -1252,6 +1279,116 @@ textarea {
   background: var(--paper);
 }
 
+.pipeline-screen {
+  background: var(--paper);
+}
+
+.pipeline-hero {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 20px 18px 16px;
+  background: var(--orange-soft);
+  color: var(--ink);
+}
+
+.pipeline-hero h1 {
+  font-size: 36px;
+  line-height: 36px;
+}
+
+.pipeline-hero > p:not(.micro) {
+  color: var(--brown);
+  font-size: 12px;
+}
+
+.pipeline-stats {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 8px;
+  margin-top: 4px;
+}
+
+.pipeline-stat {
+  min-height: 72px;
+  padding: 10px;
+  background: rgb(255 255 255 / 0.34);
+  color: var(--brown);
+}
+
+.pipeline-stat.dark {
+  background: var(--ink);
+  color: white;
+}
+
+.pipeline-stat strong,
+.pipeline-stat span {
+  display: block;
+  color: inherit;
+}
+
+.pipeline-stat strong {
+  font-family: "Funnel Sans", "Geist", system-ui, sans-serif;
+  font-size: 28px;
+  line-height: 28px;
+}
+
+.pipeline-stat span {
+  margin-top: 5px;
+  font-size: 8px;
+  font-weight: 800;
+}
+
+.pipeline-body,
+.pipeline-list {
+  display: grid;
+  gap: 10px;
+}
+
+.pipeline-stage {
+  display: grid;
+  gap: 8px;
+}
+
+.pipeline-row {
+  width: 100%;
+  min-height: 62px;
+  display: grid;
+  grid-template-columns: 38px minmax(0, 1fr) 16px;
+  align-items: center;
+  gap: 10px;
+  padding: 10px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #fffaf6;
+  color: var(--ink);
+  text-align: left;
+}
+
+.pipeline-row > span:nth-child(2) {
+  min-width: 0;
+}
+
+.pipeline-row b,
+.pipeline-row small {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.pipeline-row b {
+  font-family: "Funnel Sans", "Geist", system-ui, sans-serif;
+  font-size: 13px;
+}
+
+.pipeline-row small,
+.pipeline-empty {
+  margin-top: 3px;
+  color: var(--muted);
+  font-size: 9px;
+}
+
 .activity-hero {
   display: flex;
   flex-direction: column;
@@ -1478,6 +1615,7 @@ textarea {
 
   .detail-pane .review-screen,
   .detail-pane .preferences-screen,
+  .detail-pane .pipeline-screen,
   .detail-pane .activity-screen,
   .detail-pane .decline-screen {
     min-height: calc(100vh - 56px);
@@ -1500,7 +1638,7 @@ textarea {
 
   .workspace {
     display: block;
-    width: min(100%, 390px);
+    width: 100%;
     padding: 0 0 calc(110px + env(safe-area-inset-bottom));
   }
 
@@ -1524,6 +1662,7 @@ textarea {
 
   .review-screen,
   .preferences-screen,
+  .pipeline-screen,
   .activity-screen,
   .decline-screen {
     min-height: 100svh;
@@ -1537,7 +1676,7 @@ textarea {
     position: fixed;
     inset: auto auto 0 50%;
     z-index: 24;
-    width: min(100%, 390px);
+    width: 100%;
     transform: translateX(-50%);
     padding-bottom: max(14px, env(safe-area-inset-bottom));
   }
@@ -1552,11 +1691,11 @@ textarea {
     inset: auto 0 0;
     z-index: 20;
     display: block;
-    width: min(100%, 390px);
+    width: 100%;
     left: 50%;
     transform: translateX(-50%);
     margin: 0 auto;
-    padding: 0 16px max(12px, env(safe-area-inset-bottom));
+    padding: 0 16px max(24px, env(safe-area-inset-bottom));
     pointer-events: none;
   }
 
@@ -1568,6 +1707,7 @@ textarea {
   }
 
   .inbox-body,
+  .pipeline-body,
   .activity-body,
   .preferences-body {
     padding-bottom: 94px;

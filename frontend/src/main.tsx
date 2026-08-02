@@ -27,7 +27,7 @@ import {
 import "./styles.css";
 
 type Rating = "good" | "maybe" | "bad";
-type View = "inbox" | "activity" | "preferences";
+type View = "inbox" | "pipeline" | "activity" | "preferences";
 type Filter = "inbox" | "strong" | "maybe" | "low" | "reviewed" | "all";
 
 type AuthStatus = {
@@ -110,6 +110,12 @@ type ActivityItem = {
   created_at: string;
 };
 
+type DiscoveryRun = {
+  queries: string[];
+  limit_per_query: number;
+  results: Array<{ url: string; title?: string | null; description?: string | null }>;
+};
+
 const filters: Array<{ id: Filter; label: string }> = [
   { id: "inbox", label: "For you" },
   { id: "maybe", label: "Review" },
@@ -125,6 +131,7 @@ const quickReasons: Record<Rating, string[]> = {
 function App() {
   const [auth, setAuth] = React.useState<AuthStatus | null>(null);
   const [jobs, setJobs] = React.useState<JobListItem[]>([]);
+  const [pipelineJobs, setPipelineJobs] = React.useState<JobListItem[]>([]);
   const [selectedId, setSelectedId] = React.useState<string | null>(null);
   const [selectedJob, setSelectedJob] = React.useState<JobDetail | null>(null);
   const [filter, setFilter] = React.useState<Filter>("inbox");
@@ -132,6 +139,8 @@ function App() {
   const [activity, setActivity] = React.useState<ActivityItem[]>([]);
   const [preferences, setPreferences] = React.useState<Preferences | null>(null);
   const [loading, setLoading] = React.useState(true);
+  const [discoveryRunning, setDiscoveryRunning] = React.useState(false);
+  const [discoveryMessage, setDiscoveryMessage] = React.useState<string | null>(null);
   const [error, setError] = React.useState<string | null>(null);
   const [mobileDetailOpen, setMobileDetailOpen] = React.useState(false);
   const [declineOpen, setDeclineOpen] = React.useState(false);
@@ -141,6 +150,7 @@ function App() {
     if (reason instanceof AuthExpiredError) {
       setAuth({ auth_required: true, authenticated: false });
       setJobs([]);
+      setPipelineJobs([]);
       setSelectedId(null);
       setSelectedJob(null);
       setActivity([]);
@@ -198,6 +208,11 @@ function App() {
 
   React.useEffect(() => {
     if (!isUnlocked) return;
+    if (view === "pipeline") {
+      api<JobListItem[]>("/api/jobs?filter=all").then(setPipelineJobs).catch((reason: unknown) => {
+        if (!handleAuthExpired(reason)) setError(messageFrom(reason));
+      });
+    }
     if (view === "activity") {
       api<ActivityItem[]>("/api/activity").then(setActivity).catch((reason: unknown) => {
         if (!handleAuthExpired(reason)) setError(messageFrom(reason));
@@ -227,6 +242,25 @@ function App() {
       setActivity(await api<ActivityItem[]>("/api/activity"));
     } catch (reason) {
       if (!handleAuthExpired(reason)) setError(messageFrom(reason));
+    }
+  }
+
+  async function runDiscovery() {
+    setDiscoveryRunning(true);
+    setDiscoveryMessage(null);
+    setError(null);
+    try {
+      const result = await api<DiscoveryRun>("/api/discovery/run", { method: "POST" });
+      setDiscoveryMessage(
+        result.results.length === 1
+          ? "1 candidate found for agent review."
+          : `${result.results.length} candidates found for agent review.`
+      );
+      await loadJobs();
+    } catch (reason) {
+      if (!handleAuthExpired(reason)) setError(messageFrom(reason));
+    } finally {
+      setDiscoveryRunning(false);
     }
   }
 
@@ -260,6 +294,7 @@ function App() {
     } finally {
       setAuth({ auth_required: true, authenticated: false });
       setJobs([]);
+      setPipelineJobs([]);
       setSelectedId(null);
       setSelectedJob(null);
       setActivity([]);
@@ -300,6 +335,15 @@ function App() {
     ) : (
       <EmptyDetail />
     )
+  ) : view === "pipeline" ? (
+    <PipelineView
+      jobs={pipelineJobs}
+      onSelect={(id) => {
+        setSelectedId(id);
+        setView("inbox");
+        setMobileDetailOpen(true);
+      }}
+    />
   ) : view === "activity" ? (
     <ActivityView items={activity} jobs={jobs} />
   ) : preferences ? (
@@ -313,7 +357,7 @@ function App() {
       <aside className="desktop-rail" aria-label="Primary">
         <div className="brand-mark">JF</div>
         <NavButton icon={<Inbox />} label="Inbox" active={view === "inbox" && !declineOpen} onClick={() => navigate("inbox")} />
-        <NavButton icon={<Columns3 />} label="Pipeline" active={false} onClick={() => navigate("inbox")} />
+        <NavButton icon={<Columns3 />} label="Pipeline" active={view === "pipeline"} onClick={() => navigate("pipeline")} />
         <NavButton icon={<Bell />} label="Activity" active={view === "activity"} onClick={() => navigate("activity")} />
         <NavButton icon={<UserRound />} label="Me" active={view === "preferences"} onClick={() => navigate("preferences")} />
         {auth.auth_required ? (
@@ -330,9 +374,11 @@ function App() {
             selectedId={selectedId}
             filter={filter}
             loading={loading}
+            discoveryRunning={discoveryRunning}
+            discoveryMessage={discoveryMessage}
             error={error}
             counts={{ inboxCount, strongCount }}
-            onRefresh={() => void loadJobs()}
+            onRefresh={() => void runDiscovery()}
             onFilter={setFilter}
             onSelect={(id) => {
               setSelectedId(id);
@@ -360,6 +406,8 @@ function InboxScreen({
   selectedId,
   filter,
   loading,
+  discoveryRunning,
+  discoveryMessage,
   error,
   counts,
   onRefresh,
@@ -372,6 +420,8 @@ function InboxScreen({
   selectedId: string | null;
   filter: Filter;
   loading: boolean;
+  discoveryRunning: boolean;
+  discoveryMessage: string | null;
   error: string | null;
   counts: { inboxCount: number; strongCount: number };
   onRefresh: () => void;
@@ -391,7 +441,13 @@ function InboxScreen({
             <p className="micro orange-text">LOCAL JOBFLOW</p>
             <h1>Pulse Inbox</h1>
           </div>
-          <button className="round-action" type="button" onClick={onRefresh} aria-label="Refresh jobs">
+          <button
+            className={discoveryRunning ? "round-action is-running" : "round-action"}
+            type="button"
+            onClick={onRefresh}
+            disabled={discoveryRunning}
+            aria-label="Run job discovery"
+          >
             <ScanSearch size={20} />
           </button>
         </div>
@@ -413,6 +469,8 @@ function InboxScreen({
             </button>
           ))}
         </nav>
+
+        {discoveryMessage ? <div className="discovery-status" role="status">{discoveryMessage}</div> : null}
 
         {error ? <div className="state-card error">{error}</div> : null}
         {loading ? <div className="state-card">Loading preserved jobs...</div> : null}
@@ -859,6 +917,56 @@ function PreferencesView({ preferences, onSave }: { preferences: Preferences; on
   );
 }
 
+function PipelineView({ jobs, onSelect }: { jobs: JobListItem[]; onSelect: (id: string) => void }) {
+  const stages = [
+    { label: "Ready", note: "Strong decisions", jobs: jobs.filter((job) => job.status === "good") },
+    { label: "Review", note: "Needs your call", jobs: jobs.filter((job) => job.status === "inbox" || job.status === "maybe") },
+    { label: "Passed", note: "Agent learned", jobs: jobs.filter((job) => job.status === "bad") }
+  ];
+
+  return (
+    <article className="pipeline-screen">
+      <header className="pipeline-hero">
+        <p className="micro">APPLICATION FLOW</p>
+        <h1>Momentum</h1>
+        <p>Every role has one clear next state.</p>
+        <div className="pipeline-stats">
+          {stages.map((stage, index) => (
+            <div className={index === 0 ? "pipeline-stat dark" : "pipeline-stat"} key={stage.label}>
+              <strong>{String(stage.jobs.length).padStart(2, "0")}</strong>
+              <span>{stage.label.toUpperCase()}</span>
+            </div>
+          ))}
+        </div>
+      </header>
+
+      <div className="screen-body pipeline-body">
+        {stages.map((stage) => (
+          <section className="pipeline-stage" key={stage.label}>
+            <div className="section-head">
+              <h2>{stage.label}</h2>
+              <span>{stage.jobs.length} · {stage.note.toUpperCase()}</span>
+            </div>
+            <div className="pipeline-list">
+              {stage.jobs.map((job) => (
+                <button type="button" className="pipeline-row" key={job.id} onClick={() => onSelect(job.id)}>
+                  <span className="company-mark dark">{initial(job.company)}</span>
+                  <span>
+                    <b>{job.title}</b>
+                    <small>{job.company.toUpperCase()} · {job.score ?? "--"}% · {shortSalary(job)}</small>
+                  </span>
+                  <ArrowUpRight size={16} />
+                </button>
+              ))}
+              {stage.jobs.length === 0 ? <p className="pipeline-empty">No roles here.</p> : null}
+            </div>
+          </section>
+        ))}
+      </div>
+    </article>
+  );
+}
+
 function ActivityView({ items, jobs }: { items: ActivityItem[]; jobs: JobListItem[] }) {
   const packCount = jobs.filter((job) => job.status !== "bad").length;
   const appliedCount = jobs.filter((job) => job.status === "good").length;
@@ -1007,7 +1115,7 @@ function BottomNav({ activeView, onNavigate }: { activeView: View; onNavigate: (
     <div className="screen-nav-wrap">
       <nav className="bottom-nav" aria-label="Primary">
         <NavButton icon={<Inbox />} label="Inbox" active={activeView === "inbox"} onClick={() => onNavigate("inbox")} />
-        <NavButton icon={<Columns3 />} label="Pipeline" active={false} onClick={() => onNavigate("inbox")} />
+        <NavButton icon={<Columns3 />} label="Pipeline" active={activeView === "pipeline"} onClick={() => onNavigate("pipeline")} />
         <NavButton icon={<Bell />} label="Activity" active={activeView === "activity"} onClick={() => onNavigate("activity")} />
         <NavButton icon={<UserRound />} label="Me" active={activeView === "preferences"} onClick={() => onNavigate("preferences")} />
       </nav>
@@ -1166,6 +1274,21 @@ if ("serviceWorker" in navigator) {
   window.addEventListener("load", () => {
     navigator.serviceWorker.register("/sw.js").catch(() => undefined);
   });
+}
+
+if (!document.documentElement.dataset.jobflowGesturesLocked) {
+  const preventGesture = (event: Event) => event.preventDefault();
+  document.addEventListener(
+    "touchmove",
+    (event) => {
+      if (event.touches.length > 1) event.preventDefault();
+    },
+    { passive: false }
+  );
+  for (const eventName of ["gesturestart", "gesturechange", "gestureend"]) {
+    document.addEventListener(eventName, preventGesture, { passive: false });
+  }
+  document.documentElement.dataset.jobflowGesturesLocked = "true";
 }
 
 ReactDOM.createRoot(document.getElementById("root")!).render(
