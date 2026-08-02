@@ -124,6 +124,8 @@ class Preferences(BaseModel):
     role_families: list[str] = Field(default_factory=list)
     priorities: list[str] = Field(default_factory=list)
     hard_rules: list[str] = Field(default_factory=list)
+    discovery_queries: list[str] = Field(default_factory=list)
+    discovery_limit_per_query: int = Field(default=5, ge=1, le=20)
     language_preference: str | None = None
     application_language: str | None = None
     manual_submission_only: bool = True
@@ -137,3 +139,44 @@ class ActivityItem(BaseModel):
     body: str = ""
     job_id: str | None = None
     created_at: str
+
+
+class DiscoverySearchIn(BaseModel):
+    query: str = Field(min_length=1, max_length=500)
+    limit: int = Field(default=5, ge=1, le=20)
+
+    @field_validator("query", mode="before")
+    @classmethod
+    def clean_query(cls, value: str) -> str:
+        return " ".join(str(value).split())
+
+
+class DiscoveryScrapeIn(BaseModel):
+    url: str = Field(min_length=1)
+
+    @field_validator("url", mode="before")
+    @classmethod
+    def clean_url(cls, value: str) -> str:
+        return str(value).strip()
+
+
+class DiscoverySearchResult(BaseModel):
+    url: str
+    title: str
+    description: str = ""
+
+
+class DiscoveryRunResult(DiscoverySearchResult):
+    matched_queries: list[str] = Field(default_factory=list)
+
+
+class DiscoveryRunOut(BaseModel):
+    queries: list[str]
+    limit_per_query: int
+    results: list[DiscoveryRunResult]
+
+
+class DiscoveryScrapeResult(BaseModel):
+    url: str
+    markdown: str
+    metadata: dict[str, object] = Field(default_factory=dict)

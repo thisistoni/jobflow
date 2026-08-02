@@ -110,6 +110,8 @@ def init_db(path: str | Path | None = None) -> None:
                 role_families_json TEXT NOT NULL DEFAULT '[]',
                 priorities_json TEXT NOT NULL DEFAULT '[]',
                 hard_rules_json TEXT NOT NULL DEFAULT '[]',
+                discovery_queries_json TEXT NOT NULL DEFAULT '[]',
+                discovery_limit_per_query INTEGER NOT NULL DEFAULT 5,
                 language_preference TEXT,
                 application_language TEXT,
                 manual_submission_only INTEGER NOT NULL DEFAULT 1,
@@ -131,6 +133,8 @@ def init_db(path: str | Path | None = None) -> None:
         _ensure_column(db, "jobs", "extracted_description", "TEXT")
         _ensure_column(db, "jobs", "salary_max_annual", "INTEGER")
         _ensure_column(db, "jobs", "salary_currency", "TEXT")
+        _ensure_column(db, "preferences", "discovery_queries_json", "TEXT NOT NULL DEFAULT '[]'")
+        _ensure_column(db, "preferences", "discovery_limit_per_query", "INTEGER NOT NULL DEFAULT 5")
 
 
 def _ensure_column(db: sqlite3.Connection, table: str, column: str, definition: str) -> None:

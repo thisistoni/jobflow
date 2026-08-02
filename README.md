@@ -6,9 +6,9 @@ JobFlow is a clean, single-user, self-hosted job-search review loop. This first 
 2. Review jobs in a mobile-first installable PWA.
 3. Mark each job Good, Maybe, or Bad with quick reasons and a note.
 4. Persist feedback, preferences, and local activity.
-5. Let an already-running agent ingest jobs and persist structured analysis through a documented HTTP CLI.
+5. Let an already-running agent discover candidates, ingest chosen job facts, and persist structured analysis through a documented HTTP CLI.
 
-There is no SaaS account model, billing, organization UI, external application submission, recruiter contact automation, or job-board connection layer in this slice.
+There is no SaaS account model, billing, organization UI, external application submission, recruiter contact automation, LLM inside JobFlow, or automatic job-board ingestion in this slice.
 
 ## Run Locally
 
@@ -48,6 +48,17 @@ You can point the backend at another database with:
 JOBFLOW_DB=/path/to/jobflow.sqlite3 uvicorn jobflow.main:app
 ```
 
+## Deterministic Discovery
+
+Discovery uses Firecrawl as a deterministic provider controlled by the agent. Configure:
+
+```bash
+export FIRECRAWL_API_KEY=...
+export FIRECRAWL_API_URL=https://api.firecrawl.dev
+```
+
+`FIRECRAWL_API_URL` may point at a private HTTP endpoint, such as a Tailscale-hosted proxy. Discovery queries and per-query limits are stored in Preferences. Raw search results are candidates, not jobs: `jobflow discovery run` canonicalizes and deduplicates URLs, returns `matched_queries`, and does not ingest anything. The agent decides which candidates to scrape, analyze, and convert into deterministic `jobflow jobs ingest` payloads.
+
 ## Agent CLI
 
 The `jobflow` command talks to the running HTTP API. It does not access SQLite directly. Set `JOBFLOW_URL` to override the default `http://127.0.0.1:8000`.
@@ -57,6 +68,9 @@ jobflow status
 jobflow preferences get
 jobflow jobs list --filter unanalyzed --limit 10
 jobflow jobs show <job_id>
+jobflow discovery search --query "site:example.com/jobs python vienna" --limit 5
+jobflow discovery run
+jobflow discovery scrape --url https://example.com/jobs/123
 jobflow activity --limit 20
 ```
 

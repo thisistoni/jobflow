@@ -3,14 +3,30 @@ from __future__ import annotations
 import uuid
 from contextlib import asynccontextmanager
 from typing import Any, Literal
+from urllib.parse import urlsplit
 
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 
 from .database import connect, decode_json, encode_json, init_db, utc_now
+from .firecrawl import FirecrawlConfigError, FirecrawlProviderError, scrape_url, search_web
 from .importer import _stable_id, canonicalize_url
-from .models import ActivityItem, FeedbackIn, FeedbackOut, JobAnalysisIn, JobDetail, JobIngestIn, JobListItem, Preferences
-
+from .models import (
+    ActivityItem,
+    DiscoveryRunOut,
+    DiscoveryRunResult,
+    DiscoveryScrapeIn,
+    DiscoveryScrapeResult,
+    DiscoverySearchIn,
+    DiscoverySearchResult,
+    FeedbackIn,
+    FeedbackOut,
+    JobAnalysisIn,
+    JobDetail,
+    JobIngestIn,
+    JobListItem,
+    Preferences,
+)
 
 
 @asynccontextmanager
@@ -319,9 +335,10 @@ def update_preferences(payload: Preferences) -> Preferences:
                 id, target_locations_json, work_modes_json, min_home_office_days,
                 salary_currency, salary_target_min, salary_target_max, acceptable_salary_min,
                 role_families_json, priorities_json, hard_rules_json,
+                discovery_queries_json, discovery_limit_per_query,
                 language_preference, application_language, manual_submission_only, updated_at
             )
-            VALUES ('default', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES ('default', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(id) DO UPDATE SET
                 target_locations_json = excluded.target_locations_json,
                 work_modes_json = excluded.work_modes_json,
@@ -333,6 +350,8 @@ def update_preferences(payload: Preferences) -> Preferences:
                 role_families_json = excluded.role_families_json,
                 priorities_json = excluded.priorities_json,
                 hard_rules_json = excluded.hard_rules_json,
+                discovery_queries_json = excluded.discovery_queries_json,
+                discovery_limit_per_query = excluded.discovery_limit_per_query,
                 language_preference = excluded.language_preference,
                 application_language = excluded.application_language,
                 manual_submission_only = excluded.manual_submission_only,
@@ -349,6 +368,8 @@ def update_preferences(payload: Preferences) -> Preferences:
                 encode_json(payload.role_families),
                 encode_json(payload.priorities),
                 encode_json(payload.hard_rules),
+                encode_json(payload.discovery_queries),
+                payload.discovery_limit_per_query,
                 payload.language_preference,
                 payload.application_language,
                 1 if payload.manual_submission_only else 0,
@@ -364,6 +385,58 @@ def update_preferences(payload: Preferences) -> Preferences:
         )
     result = payload.model_copy(update={"updated_at": now})
     return result
+
+
+@app.post("/api/discovery/search", response_model=list[DiscoverySearchResult])
+def discovery_search(payload: DiscoverySearchIn) -> list[DiscoverySearchResult]:
+    try:
+        return [DiscoverySearchResult(**item) for item in search_web(payload.query, payload.limit)]
+    except (FirecrawlConfigError, FirecrawlProviderError) as exc:
+        raise _firecrawl_http_exception(exc) from exc
+
+
+@app.post("/api/discovery/scrape", response_model=DiscoveryScrapeResult)
+def discovery_scrape(payload: DiscoveryScrapeIn) -> DiscoveryScrapeResult:
+    _validate_scrape_url(payload.url)
+    try:
+        return DiscoveryScrapeResult(**scrape_url(payload.url))
+    except (FirecrawlConfigError, FirecrawlProviderError) as exc:
+        raise _firecrawl_http_exception(exc) from exc
+
+
+@app.post("/api/discovery/run", response_model=DiscoveryRunOut)
+def discovery_run() -> DiscoveryRunOut:
+    preferences = get_preferences()
+    queries = _clean_list(preferences.discovery_queries)
+    if not queries:
+        raise HTTPException(status_code=400, detail="No discovery queries are configured")
+
+    candidates: dict[str, DiscoveryRunResult] = {}
+    try:
+        for query in queries:
+            for item in search_web(query, preferences.discovery_limit_per_query):
+                try:
+                    canonical_url = canonicalize_url(item["url"])
+                except ValueError:
+                    continue
+                candidate = candidates.get(canonical_url)
+                if candidate is None:
+                    candidates[canonical_url] = DiscoveryRunResult(
+                        url=canonical_url,
+                        title=item["title"],
+                        description=item["description"],
+                        matched_queries=[query],
+                    )
+                elif query not in candidate.matched_queries:
+                    candidate.matched_queries.append(query)
+    except (FirecrawlConfigError, FirecrawlProviderError) as exc:
+        raise _firecrawl_http_exception(exc) from exc
+
+    return DiscoveryRunOut(
+        queries=queries,
+        limit_per_query=preferences.discovery_limit_per_query,
+        results=list(candidates.values()),
+    )
 
 
 @app.get("/api/activity", response_model=list[ActivityItem])
@@ -443,8 +516,31 @@ def _preferences_from_row(row: Any) -> Preferences:
         role_families=decode_json(row["role_families_json"], []),
         priorities=decode_json(row["priorities_json"], []),
         hard_rules=decode_json(row["hard_rules_json"], []),
+        discovery_queries=decode_json(row["discovery_queries_json"], []),
+        discovery_limit_per_query=row["discovery_limit_per_query"] or 5,
         language_preference=row["language_preference"],
         application_language=row["application_language"],
         manual_submission_only=bool(row["manual_submission_only"]),
         updated_at=row["updated_at"],
     )
+
+
+def _firecrawl_http_exception(exc: FirecrawlConfigError | FirecrawlProviderError) -> HTTPException:
+    if isinstance(exc, FirecrawlConfigError):
+        return HTTPException(status_code=503, detail=str(exc))
+    return HTTPException(status_code=502, detail=str(exc))
+
+
+def _validate_scrape_url(url: str) -> None:
+    parsed = urlsplit(url)
+    if parsed.scheme not in {"http", "https"} or not parsed.hostname:
+        raise HTTPException(status_code=422, detail="URL must be absolute HTTP or HTTPS")
+
+
+def _clean_list(values: list[str]) -> list[str]:
+    cleaned: list[str] = []
+    for value in values:
+        text = " ".join(str(value).split())
+        if text and text not in cleaned:
+            cleaned.append(text)
+    return cleaned

@@ -711,6 +711,7 @@ input {
   color: #8a2200;
 }
 
+.bottom-nav-dock,
 .bottom-nav {
   display: none;
 }
@@ -772,20 +773,28 @@ input {
     min-height: auto;
   }
 
-  .bottom-nav {
+  .bottom-nav-dock {
     position: fixed;
-    left: 50%;
-    right: auto;
-    bottom: max(14px, env(safe-area-inset-bottom));
-    width: min(calc(100% - 32px), 420px);
-    transform: translateX(-50%);
+    inset: auto 0 0;
+    display: block;
+    padding: 26px 16px max(14px, env(safe-area-inset-bottom));
+    background: linear-gradient(180deg, rgba(247, 244, 238, 0), rgba(247, 244, 238, 0.98) 28%, var(--paper) 58%);
+    z-index: 20;
+    pointer-events: none;
+  }
+
+  .bottom-nav {
+    position: static;
+    width: min(100%, 420px);
+    margin: 0 auto;
     display: grid;
     grid-template-columns: repeat(3, 1fr);
     gap: 6px;
     padding: 7px;
     border-radius: 22px;
     background: var(--ink);
-    z-index: 10;
+    box-shadow: 0 12px 32px rgba(22, 22, 22, 0.25);
+    pointer-events: auto;
   }
 }
 

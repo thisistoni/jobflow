@@ -63,6 +63,15 @@ def build_parser() -> argparse.ArgumentParser:
     apply_preferences = preference_commands.add_parser("apply", help="Replace search preferences from JSON.")
     apply_preferences.add_argument("--file", required=True, help="JSON file path, or - for stdin.")
 
+    discovery = commands.add_parser("discovery", help="Search and scrape deterministic web candidates.")
+    discovery_commands = discovery.add_subparsers(dest="discovery_command", required=True)
+    discovery_search = discovery_commands.add_parser("search", help="Search web candidates through Firecrawl.")
+    discovery_search.add_argument("--query", required=True)
+    discovery_search.add_argument("--limit", type=int, default=5)
+    discovery_run = discovery_commands.add_parser("run", help="Run configured discovery queries.")
+    discovery_scrape = discovery_commands.add_parser("scrape", help="Scrape one candidate URL through Firecrawl.")
+    discovery_scrape.add_argument("--url", required=True)
+
     feedback = commands.add_parser("feedback", help="Write explicit user feedback.")
     feedback_commands = feedback.add_subparsers(dest="feedback_command", required=True)
     set_feedback = feedback_commands.add_parser("set", help="Mark a job good, maybe, or bad.")
@@ -94,6 +103,13 @@ def dispatch(args: argparse.Namespace, client: "Client") -> Any:
             return client.request("GET", "/api/preferences")
         if args.preferences_command == "apply":
             return client.request("PUT", "/api/preferences", read_json(args.file))
+    if args.command == "discovery":
+        if args.discovery_command == "search":
+            return client.request("POST", "/api/discovery/search", {"query": args.query, "limit": args.limit})
+        if args.discovery_command == "run":
+            return client.request("POST", "/api/discovery/run")
+        if args.discovery_command == "scrape":
+            return client.request("POST", "/api/discovery/scrape", {"url": args.url})
     if args.command == "feedback" and args.feedback_command == "set":
         return client.request(
             "POST",

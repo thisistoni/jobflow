@@ -82,6 +82,8 @@ type Preferences = {
   role_families: string[];
   priorities: string[];
   hard_rules: string[];
+  discovery_queries: string[];
+  discovery_limit_per_query: number;
   language_preference?: string | null;
   application_language?: string | null;
   manual_submission_only: boolean;
@@ -273,11 +275,13 @@ function App() {
         </section>
       </main>
 
-      <nav className="bottom-nav" aria-label="Primary mobile">
-        <NavButton icon={<Inbox />} label="Inbox" active={view === "inbox"} onClick={() => { setView("inbox"); setMobileDetailOpen(false); }} />
-        <NavButton icon={<Activity />} label="Activity" active={view === "activity"} onClick={() => { setView("activity"); setMobileDetailOpen(false); }} />
-        <NavButton icon={<SlidersHorizontal />} label="Me" active={view === "preferences"} onClick={() => { setView("preferences"); setMobileDetailOpen(false); }} />
-      </nav>
+      <div className="bottom-nav-dock">
+        <nav className="bottom-nav" aria-label="Primary mobile">
+          <NavButton icon={<Inbox />} label="Inbox" active={view === "inbox"} onClick={() => { setView("inbox"); setMobileDetailOpen(false); }} />
+          <NavButton icon={<Activity />} label="Activity" active={view === "activity"} onClick={() => { setView("activity"); setMobileDetailOpen(false); }} />
+          <NavButton icon={<SlidersHorizontal />} label="Me" active={view === "preferences"} onClick={() => { setView("preferences"); setMobileDetailOpen(false); }} />
+        </nav>
+      </div>
     </div>
   );
 }
@@ -487,6 +491,25 @@ function PreferencesView({ preferences, onSave }: { preferences: Preferences; on
       <EditorArea label="Hard rules" value={draft.hard_rules.join("\n")} onChange={(value) => setList("hard_rules", value)} />
 
       <section className="content-section compact">
+        <h3>Discovery</h3>
+        <label className="field-row">
+          Results per query
+          <input
+            type="number"
+            min={1}
+            max={20}
+            value={draft.discovery_limit_per_query}
+            onChange={(event) => setDraft({ ...draft, discovery_limit_per_query: boundedNumber(event.target.value, 1, 20, 5) })}
+          />
+        </label>
+      </section>
+      <EditorArea
+        label="Discovery queries"
+        value={draft.discovery_queries.join("\n")}
+        onChange={(value) => setList("discovery_queries", value)}
+      />
+
+      <section className="content-section compact">
         <h3>Manual control</h3>
         <label className="toggle-row">
           External applications stay manual
@@ -606,6 +629,12 @@ function numberOrNull(value: string) {
   if (value === "") return null;
   const parsed = Number(value);
   return Number.isFinite(parsed) ? parsed : null;
+}
+
+function boundedNumber(value: string, min: number, max: number, fallback: number) {
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed)) return fallback;
+  return Math.min(max, Math.max(min, Math.trunc(parsed)));
 }
 
 function messageFrom(reason: unknown) {
