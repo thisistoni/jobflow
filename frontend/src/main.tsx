@@ -642,10 +642,10 @@ function InboxScreen({
           </button>
         </div>
         <div className="daily-match">
-          <strong>{pulse.today_count.toString().padStart(2, "0")}</strong>
+          <strong>{jobs.length.toString().padStart(2, "0")}</strong>
           <div>
-            <h2>new roles found today</h2>
-            <p>{counts.strongCount} look unusually good for you</p>
+            <h2>{filter === "inbox" ? "application packs ready" : "jobs in this view"}</h2>
+            <p>{filter === "inbox" ? "Prepared CV + PDF application letter" : "Only complete packs and reviewed history are shown"}</p>
           </div>
         </div>
         <PulseBars days={pulse.days} />
