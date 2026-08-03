@@ -627,8 +627,9 @@ def reactive_resume_connect(payload: ReactiveResumeConnectIn) -> ReactiveResumeS
         client = ReactiveResumeClient(api_key, base_url)
         resumes = client.list_resumes()
         options = _reactive_resume_options(resumes)
-        canonical = [row for row in resumes if row.get("name") == "Hermes Canonical Base CV"]
-        reference = _reactive_resume_reference(client.get_resume(str(canonical[0]["id"]))) if len(canonical) == 1 else None
+        canonical = [row for row in resumes if row.get("name") in {"Base CV", "Hermes Canonical Base CV"}]
+        canonical.sort(key=lambda row: 0 if row.get("name") == "Base CV" else 1)
+        reference = _reactive_resume_reference(client.get_resume(str(canonical[0]["id"]))) if canonical else None
         encrypted = encrypt_api_key(api_key)
     except (ValueError, ReactiveResumeError, SecretStoreError, KeyError) as exc:
         _record_reactive_resume_error(str(exc))
@@ -822,10 +823,11 @@ def _reactive_resume_options(resumes: list[dict[str, Any]]) -> list[ReactiveResu
         name = str(row.get("name", "")).strip()
         if not resume_id or not name:
             continue
+        display_name = "Base CV" if name in {"Base CV", "Hermes Canonical Base CV"} else name
         options.append(
             ReactiveResumeOption(
                 id=resume_id,
-                name=name,
+                name=display_name,
                 updated_at=str(row.get("updatedAt")) if row.get("updatedAt") else None,
                 historical_source=name == "Hermes Starting Template",
             )
@@ -844,7 +846,8 @@ def _reactive_resume_reference(detail: dict[str, Any]) -> ReactiveResumeReferenc
     metadata: dict[str, Any] = raw_metadata if isinstance(raw_metadata, dict) else {}
     template = str(metadata.get("template")) if metadata.get("template") else None
     updated_at = str(detail.get("updatedAt")) if detail.get("updatedAt") else None
-    return ReactiveResumeReference(id=resume_id, name=name, template=template, updated_at=updated_at)
+    display_name = "Base CV" if name in {"Base CV", "Hermes Canonical Base CV"} else name
+    return ReactiveResumeReference(id=resume_id, name=display_name, template=template, updated_at=updated_at)
 
 
 def _record_reactive_resume_error(message: str) -> None:
@@ -914,7 +917,8 @@ def _generated_discovery_queries(preferences: Preferences, enabled_source_ids: s
     for role in roles[:6]:
         for location in locations[:2]:
             suffix = " company careers" if enabled_source_ids == {"company_careers"} else " jobs"
-            queries.append(f"{role}{suffix} {location}")
+            searchable_role = " ".join(role.replace("_", " ").split())
+            queries.append(f"{searchable_role}{suffix} {location}")
             if len(queries) >= 12:
                 return queries
     return queries

@@ -29,8 +29,8 @@ def test_discovery_operations_generate_queries_persist_history_and_priority_role
         "salary_target_min": 50000,
         "salary_target_max": 56000,
         "acceptable_salary_min": 47500,
-        "role_families": ["Junior software developer", "Internal tools developer"],
-        "priority_role_families": ["Internal tools developer"],
+        "role_families": ["junior_software_developer", "internal_tools_developer"],
+        "priority_role_families": ["internal_tools_developer"],
         "priorities": ["German-speaking team"],
         "hard_rules": [],
         "discovery_queries": [],
@@ -41,7 +41,7 @@ def test_discovery_operations_generate_queries_persist_history_and_priority_role
     }
     saved = client.put("/api/preferences", json=preferences)
     assert saved.status_code == 200
-    assert saved.json()["priority_role_families"] == ["Internal tools developer"]
+    assert saved.json()["priority_role_families"] == ["internal_tools_developer"]
 
     operations = client.get("/api/discovery/operations")
     assert operations.status_code == 200
@@ -50,7 +50,8 @@ def test_discovery_operations_generate_queries_persist_history_and_priority_role
         "timezone": "Europe/Vienna",
         "times": ["07:00", "13:00", "19:00"],
     }
-    assert operations.json()["generated_queries"][0] == "Internal tools developer jobs Wien"
+    assert operations.json()["generated_queries"][0] == "internal tools developer jobs Wien"
+    assert all("_" not in query for query in operations.json()["generated_queries"])
     assert operations.json()["next_run_at"]
 
     unavailable = client.put(

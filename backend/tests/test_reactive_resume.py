@@ -76,7 +76,8 @@ def test_reactive_resume_secret_reference_and_pdf_contract(tmp_path: Path, monke
     assert "good-secret" not in connected.text
     assert body["configured"] is True
     assert body["verified"] is True
-    assert body["reference"]["name"] == "Hermes Canonical Base CV"
+    assert body["reference"]["name"] == "Base CV"
+    assert any(option["name"] == "Base CV" for option in body["available_resumes"])
     assert body["reference"]["template"] == "chikorita"
     assert any(option["historical_source"] for option in body["available_resumes"])
 

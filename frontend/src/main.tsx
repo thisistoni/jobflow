@@ -1440,7 +1440,7 @@ function DiscoveryOperationsPanel({
       </div>
 
       <div className="operation-block query-preview">
-        <div className="operation-heading"><div><b>Search plan</b><small>Generated from saved priority roles and locations.</small></div><em>{operations.generated_queries.length}</em></div>
+        <div className="operation-heading"><div><b>Search plan</b><small>Exact phrases used by Search now and scheduled scans, generated from your saved roles and locations.</small></div><em>{operations.generated_queries.length}</em></div>
         {operations.generated_queries.slice(0, 4).map((query) => <span key={query}>{query}</span>)}
         {operations.generated_queries.length > 4 ? <small>+{operations.generated_queries.length - 4} more searches</small> : null}
       </div>
