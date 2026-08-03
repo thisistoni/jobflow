@@ -1620,6 +1620,7 @@ function PipelineView({ jobs, onSelect }: { jobs: JobListItem[]; onSelect: (id: 
 function ActivityView({ items, jobs, onOpenSettings }: { items: ActivityItem[]; jobs: JobListItem[]; onOpenSettings: () => void }) {
   const packCount = jobs.filter((job) => job.status !== "bad").length;
   const likedCount = jobs.filter((job) => job.status === "good").length;
+  const groups = groupActivitiesByDay(items);
   return (
     <article className="activity-screen">
       <header className="activity-hero">
@@ -1640,26 +1641,29 @@ function ActivityView({ items, jobs, onOpenSettings }: { items: ActivityItem[]; 
       </header>
 
       <div className="screen-body activity-body">
-        <div className="section-head">
-          <h2>Today</h2>
-          <span>{new Intl.DateTimeFormat(undefined, { weekday: "short", day: "2-digit", month: "short" }).format(new Date()).toUpperCase()}</span>
-        </div>
-        <div className="activity-list">
-          {items.map((item, index) => (
-            <div className="activity-item" key={item.id}>
-              <span className="activity-icon"><ActivityIcon kind={item.kind} /></span>
-              <div>
-                <div className="activity-item-top">
-                  <strong>{item.title}</strong>
-                  <time>{formatTime(item.created_at)}</time>
-                </div>
-                <p>{item.body}</p>
-              </div>
-              <ArrowUpRight size={14} />
-              {index === 3 ? <div className="day-break">Yesterday</div> : null}
+        {groups.map((group) => (
+          <React.Fragment key={group.key}>
+            <div className="section-head">
+              <h2>{group.label}</h2>
+              <span>{new Intl.DateTimeFormat(undefined, { weekday: "short", day: "2-digit", month: "short" }).format(group.date).toUpperCase()}</span>
             </div>
-          ))}
-        </div>
+            <div className="activity-list">
+              {group.items.map((item) => (
+                <div className="activity-item" key={item.id}>
+                  <span className="activity-icon"><ActivityIcon kind={item.kind} /></span>
+                  <div>
+                    <div className="activity-item-top">
+                      <strong>{item.title}</strong>
+                      <time>{formatTime(item.created_at)}</time>
+                    </div>
+                    <p>{item.body}</p>
+                  </div>
+                  <ArrowUpRight size={14} />
+                </div>
+              ))}
+            </div>
+          </React.Fragment>
+        ))}
         {items.length === 0 ? <div className="state-card">No activity yet.</div> : null}
       </div>
       <BottomNav activeView="activity" onNavigate={() => undefined} />
@@ -1940,6 +1944,38 @@ function humanize(value: string) {
 
 function formatTime(value: string) {
   return new Intl.DateTimeFormat(undefined, { hour: "2-digit", minute: "2-digit" }).format(new Date(value));
+}
+
+function groupActivitiesByDay(items: ActivityItem[]) {
+  const today = new Date();
+  const yesterday = new Date(today);
+  yesterday.setDate(today.getDate() - 1);
+  const dateKey = (date: Date) => `${date.getFullYear()}-${date.getMonth()}-${date.getDate()}`;
+  const todayKey = dateKey(today);
+  const yesterdayKey = dateKey(yesterday);
+  const groups = new Map<string, { key: string; label: string; date: Date; items: ActivityItem[] }>();
+
+  for (const item of items) {
+    const date = new Date(item.created_at);
+    const key = dateKey(date);
+    const existing = groups.get(key);
+    if (existing) {
+      existing.items.push(item);
+      continue;
+    }
+    groups.set(key, {
+      key,
+      label: key === todayKey
+        ? "Today"
+        : key === yesterdayKey
+          ? "Yesterday"
+          : new Intl.DateTimeFormat(undefined, { weekday: "long" }).format(date),
+      date,
+      items: [item]
+    });
+  }
+
+  return [...groups.values()];
 }
 
 function formatDateTime(value: string) {

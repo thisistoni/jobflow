@@ -2209,14 +2209,6 @@ textarea {
   white-space: nowrap;
 }
 
-.day-break {
-  grid-column: 1 / -1;
-  padding-top: 8px;
-  color: var(--ink);
-  font-family: "Funnel Sans", "Geist", system-ui, sans-serif;
-  font-size: 16px;
-  font-weight: 800;
-}
 
 .login-shell {
   min-height: 100vh;
