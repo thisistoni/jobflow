@@ -183,9 +183,17 @@ def crawl_karriere(
         details: list[KarriereJobDetail] = []
         for listing in list(listings.values())[:max_details]:
             client.navigate(tab_id, listing.url)
-            detail = parse_detail_snapshot(client.snapshot(tab_id), listing.url)
+            try:
+                detail = parse_detail_snapshot(client.snapshot(tab_id), listing.url)
+            except CamofoxProviderError:
+                # Search results can contain listings that expire or redirect between
+                # the result-page snapshot and the detail navigation. Skip that one
+                # candidate; never abort the rest of a multi-job run.
+                continue
             detail.matched_queries = list(listing.matched_queries)
             details.append(detail)
+        if listings and not details:
+            raise CamofoxProviderError("Karriere.at search returned listings, but no detail page could be normalized")
         return raw_count, details
     finally:
         client.close_tab(tab_id)

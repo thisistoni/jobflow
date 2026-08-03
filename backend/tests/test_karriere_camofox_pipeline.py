@@ -20,6 +20,14 @@ SEARCH_SNAPSHOT = '''
       - /url: https://www.karriere.at/f/example
     - text: Wien
     - button "Auf Merkliste"
+  - listitem:
+    - heading "Web Developer:in" [level=2]:
+      - link "Web Developer:in":
+        - /url: https://www.karriere.at/jobs/654321
+    - link "Second GmbH":
+      - /url: https://www.karriere.at/f/second
+    - text: Wien
+    - button "Auf Merkliste"
 '''
 
 DETAIL_SNAPSHOT = '''
@@ -66,13 +74,47 @@ def _detail(job_id: str = "123456") -> KarriereJobDetail:
 def test_parses_karriere_search_and_detail() -> None:
     listings = parse_search_snapshot(SEARCH_SNAPSHOT)
     assert [(item.url, item.title, item.company) for item in listings] == [
-        ("https://www.karriere.at/jobs/123456", "Junior Software Entwickler:in", "Example GmbH")
+        ("https://www.karriere.at/jobs/123456", "Junior Software Entwickler:in", "Example GmbH"),
+        ("https://www.karriere.at/jobs/654321", "Web Developer:in", "Second GmbH"),
     ]
     detail = parse_detail_snapshot(DETAIL_SNAPSHOT, listings[0].url)
     assert detail.company == "Example GmbH"
     assert detail.salary_min_annual == 58_800
     assert detail.work_mode == "Hybrid"
     assert detail.requirements == ["Python und SQL", "2 Jahre praktische Erfahrung"]
+
+
+def test_crawl_skips_one_expired_detail_instead_of_aborting(monkeypatch: Any) -> None:
+    import jobflow.karriere_camofox as karriere
+
+    class FakeClient:
+        def __init__(self) -> None:
+            self.current = ""
+
+        def health(self) -> bool:
+            return True
+
+        def create_tab(self, url: str) -> str:
+            self.current = url
+            return "tab"
+
+        def navigate(self, _tab_id: str, url: str) -> None:
+            self.current = url
+
+        def snapshot(self, _tab_id: str) -> str:
+            if "keywords=" in self.current:
+                return SEARCH_SNAPSHOT
+            if self.current.endswith("123456"):
+                return '- heading "Expired" [level=1]'
+            return DETAIL_SNAPSHOT.replace("Junior Software Entwickler:in", "Web Developer:in").replace("Example GmbH", "Second GmbH")
+
+        def close_tab(self, _tab_id: str) -> None:
+            return None
+
+    monkeypatch.setattr(karriere, "CamofoxClient", FakeClient)
+    raw, details = karriere.crawl_karriere(["software Wien"], limit_per_query=2, max_details=2)
+    assert raw == 2
+    assert [item.source_id for item in details] == ["654321"]
 
 
 def test_camofox_candidates_become_visible_jobs_and_declines_stay_suppressed(
