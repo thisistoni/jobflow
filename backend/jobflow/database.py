@@ -155,6 +155,9 @@ def init_db(path: str | Path | None = None) -> None:
                 queries_json TEXT NOT NULL DEFAULT '[]',
                 candidate_count INTEGER NOT NULL DEFAULT 0,
                 unique_count INTEGER NOT NULL DEFAULT 0,
+                jobs_added INTEGER NOT NULL DEFAULT 0,
+                jobs_evaluated INTEGER NOT NULL DEFAULT 0,
+                packs_prepared INTEGER NOT NULL DEFAULT 0,
                 error TEXT
             );
 
@@ -193,6 +196,19 @@ def init_db(path: str | Path | None = None) -> None:
                 resumes_json TEXT NOT NULL DEFAULT '[]',
                 updated_at TEXT NOT NULL
             );
+
+            CREATE TABLE IF NOT EXISTS application_packs (
+                job_id TEXT PRIMARY KEY REFERENCES jobs(id) ON DELETE CASCADE,
+                status TEXT NOT NULL CHECK (status IN ('preparing', 'ready', 'failed')),
+                resume_id TEXT,
+                resume_name TEXT,
+                resume_pdf_pages INTEGER,
+                letter_subject TEXT,
+                letter_body TEXT,
+                error TEXT,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            );
             """
         )
         _ensure_column(db, "jobs", "source_name", "TEXT")
@@ -204,6 +220,9 @@ def init_db(path: str | Path | None = None) -> None:
         _ensure_column(db, "preferences", "discovery_limit_per_query", "INTEGER NOT NULL DEFAULT 5")
         _ensure_column(db, "preferences", "priority_role_families_json", "TEXT NOT NULL DEFAULT '[]'")
         _ensure_column(db, "discovery_candidates", "source", "TEXT NOT NULL DEFAULT 'open_web'")
+        _ensure_column(db, "discovery_runs", "jobs_added", "INTEGER NOT NULL DEFAULT 0")
+        _ensure_column(db, "discovery_runs", "jobs_evaluated", "INTEGER NOT NULL DEFAULT 0")
+        _ensure_column(db, "discovery_runs", "packs_prepared", "INTEGER NOT NULL DEFAULT 0")
         now = utc_now()
         db.execute(
             """

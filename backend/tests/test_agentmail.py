@@ -63,6 +63,7 @@ def test_karriere_alert_source_can_run_without_web_search(tmp_path: Path, monkey
             ],
         )
 
+    monkeypatch.setattr(main, "camofox_available", lambda: False)
     monkeypatch.setattr(main, "fetch_karriere_alerts", fake_alerts)
     monkeypatch.setattr(main, "search_web", lambda *_: (_ for _ in ()).throw(AssertionError("web search called")))
     run = client.post("/api/discovery/run")

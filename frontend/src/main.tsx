@@ -8,6 +8,8 @@ import {
   BrainCircuit,
   BriefcaseBusiness,
   Check,
+  CheckCircle2,
+  ClipboardCheck,
   Circle,
   Columns3,
   ExternalLink,
@@ -21,7 +23,7 @@ import {
   ScanSearch,
   Settings2,
   SlidersHorizontal,
-  Sparkles,
+
   Target,
   Trash2,
   Unplug,
@@ -62,6 +64,18 @@ type JobListItem = {
   missing_info: string[];
   source_url: string;
   feedback?: Feedback | null;
+  pack_status?: "preparing" | "ready" | "failed" | null;
+};
+
+type ApplicationPack = {
+  status: "preparing" | "ready" | "failed";
+  resume_id: string | null;
+  resume_name: string | null;
+  resume_pdf_pages: number | null;
+  letter_subject: string | null;
+  letter_body: string | null;
+  error: string | null;
+  updated_at: string;
 };
 
 type EvidenceItem = {
@@ -84,6 +98,7 @@ type JobDetail = JobListItem & {
   first_seen_at: string;
   updated_at: string;
   reviewed_at?: string | null;
+  application_pack: ApplicationPack | null;
 };
 
 type Preferences = {
@@ -120,6 +135,9 @@ type DiscoveryRun = {
   queries: string[];
   limit_per_query: number;
   results: Array<{ url: string; title?: string | null; description?: string | null }>;
+  jobs_added: number;
+  jobs_evaluated: number;
+  packs_prepared: number;
 };
 
 type DiscoveryRunSummary = {
@@ -131,6 +149,9 @@ type DiscoveryRunSummary = {
   queries: string[];
   candidate_count: number;
   unique_count: number;
+  jobs_added: number;
+  jobs_evaluated: number;
+  packs_prepared: number;
   error?: string | null;
 };
 
@@ -174,7 +195,7 @@ const filters: Array<{ id: Filter; label: string }> = [
 
 const quickReasons: Record<Rating, string[]> = {
   good: ["Strong builder fit", "Good salary signal", "Right work mode", "Worth preparing"],
-  maybe: ["Needs salary check", "Remote policy unclear", "Seniority uncertain", "Could be adjacent"],
+  maybe: ["CV needs changes", "Letter needs changes", "Fit analysis looks wrong", "Missing information", "Keep for later"],
   bad: ["Salary below target", "Remote policy unclear", "Company does not excite me", "Seniority feels wrong", "Role focus is off"]
 };
 
@@ -196,7 +217,9 @@ function App() {
   const [discoveryMessage, setDiscoveryMessage] = React.useState<string | null>(null);
   const [error, setError] = React.useState<string | null>(null);
   const [mobileDetailOpen, setMobileDetailOpen] = React.useState(false);
-  const [declineOpen, setDeclineOpen] = React.useState(false);
+  const [feedbackMode, setFeedbackMode] = React.useState<"decline" | "revise" | null>(null);
+  const [feedbackSaving, setFeedbackSaving] = React.useState(false);
+  const [actionNotice, setActionNotice] = React.useState<string | null>(null);
   const isUnlocked = auth != null && (!auth.auth_required || auth.authenticated);
 
   const handleAuthExpired = React.useCallback((reason: unknown) => {
@@ -212,7 +235,9 @@ function App() {
       setDiscoveryOperations(null);
       setReactiveResume(null);
       setError(null);
-      setDeclineOpen(false);
+      setFeedbackMode(null);
+      setFeedbackSaving(false);
+      setActionNotice(null);
       return true;
     }
     return false;
@@ -300,19 +325,29 @@ function App() {
   const strongCount = jobs.filter((job) => (job.score ?? 0) >= 70).length;
 
   async function submitFeedback(rating: Rating, reasons: string[], note: string) {
-    if (!selectedJob) return;
+    if (!selectedJob || feedbackSaving) return;
+    setFeedbackSaving(true);
     try {
       const feedback = await api<Feedback>(`/api/jobs/${selectedJob.id}/feedback`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ rating, reasons, note })
       });
-      setSelectedJob({ ...selectedJob, status: rating, feedback });
-      setDeclineOpen(false);
+      setSelectedJob((current) => current ? { ...current, status: rating, feedback } : current);
+      setFeedbackMode(null);
+      setActionNotice(
+        rating === "bad"
+          ? "Moved to Passed. Your decline feedback is saved."
+          : rating === "maybe"
+            ? "Moved to Review. Your requested changes are saved."
+            : "Application pack approved."
+      );
       await loadJobs();
       setActivity(await api<ActivityItem[]>("/api/activity"));
     } catch (reason) {
       if (!handleAuthExpired(reason)) setError(messageFrom(reason));
+    } finally {
+      setFeedbackSaving(false);
     }
   }
 
@@ -323,9 +358,7 @@ function App() {
     try {
       const result = await api<DiscoveryRun>("/api/discovery/run", { method: "POST" });
       setDiscoveryMessage(
-        result.results.length === 1
-          ? "1 candidate found for agent review."
-          : `${result.results.length} candidates found for agent review.`
+        `${result.results.length} unique candidates · ${result.jobs_added} new jobs · ${result.packs_prepared} application packs ready.`
       );
       setDiscoveryOperations(await api<DiscoveryOperations>("/api/discovery/operations"));
       setActivity(await api<ActivityItem[]>("/api/activity"));
@@ -411,14 +444,17 @@ function App() {
       setDiscoveryOperations(null);
       setReactiveResume(null);
       setMobileDetailOpen(false);
-      setDeclineOpen(false);
+      setFeedbackMode(null);
+      setFeedbackSaving(false);
+      setActionNotice(null);
     }
   }
 
   function navigate(next: View) {
     setView(next);
     setMobileDetailOpen(false);
-    setDeclineOpen(false);
+    setFeedbackMode(null);
+    setActionNotice(null);
   }
 
   if (auth == null) {
@@ -429,19 +465,24 @@ function App() {
     return <LoginScreen error={error} onLogin={submitLogin} />;
   }
 
-  const detail = declineOpen && selectedJob ? (
+  const detail = feedbackMode && selectedJob ? (
     <DeclineFeedback
       job={selectedJob}
-      onClose={() => setDeclineOpen(false)}
-      onFeedback={(reasons, note) => void submitFeedback("bad", reasons, note)}
+      mode={feedbackMode}
+      saving={feedbackSaving}
+      onClose={() => setFeedbackMode(null)}
+      onFeedback={(reasons, note) => void submitFeedback(feedbackMode === "decline" ? "bad" : "maybe", reasons, note)}
     />
   ) : view === "inbox" ? (
     selectedJob ? (
       <JobReview
         job={selectedJob}
+        actionNotice={actionNotice}
+        saving={feedbackSaving}
         onBack={() => setMobileDetailOpen(false)}
-        onDecline={() => setDeclineOpen(true)}
-        onFeedback={(rating, reasons, note) => void submitFeedback(rating, reasons, note)}
+        onDecline={() => setFeedbackMode("decline")}
+        onRevise={() => setFeedbackMode("revise")}
+        onApprove={() => void submitFeedback("good", ["Application pack approved"], "")}
       />
     ) : (
       <EmptyDetail />
@@ -451,6 +492,7 @@ function App() {
       jobs={pipelineJobs}
       onSelect={(id) => {
         setSelectedId(id);
+        setActionNotice(null);
         setView("inbox");
         setMobileDetailOpen(true);
       }}
@@ -495,7 +537,7 @@ function App() {
     <div className="app-shell">
       <aside className="desktop-rail" aria-label="Primary">
         <div className="brand-mark">JF</div>
-        <NavButton icon={<Inbox />} label="Inbox" active={view === "inbox" && !declineOpen} onClick={() => navigate("inbox")} />
+        <NavButton icon={<Inbox />} label="Inbox" active={view === "inbox" && !feedbackMode} onClick={() => navigate("inbox")} />
         <NavButton icon={<Columns3 />} label="Pipeline" active={view === "pipeline"} onClick={() => navigate("pipeline")} />
         <NavButton icon={<Bell />} label="Activity" active={view === "activity"} onClick={() => navigate("activity")} />
         <NavButton icon={<UserRound />} label="Me" active={view === "preferences"} onClick={() => navigate("preferences")} />
@@ -506,7 +548,7 @@ function App() {
         ) : null}
       </aside>
 
-      <main className={`workspace view-${view} ${mobileDetailOpen || declineOpen ? "mobile-detail-open" : ""}`}>
+      <main className={`workspace view-${view} ${mobileDetailOpen || feedbackMode ? "mobile-detail-open" : ""}`}>
         <section className="phone-surface inbox-pane" aria-label="Pulse Inbox">
           <InboxScreen
             jobs={jobs}
@@ -522,9 +564,10 @@ function App() {
             onFilter={setFilter}
             onSelect={(id) => {
               setSelectedId(id);
+              setActionNotice(null);
               setView("inbox");
               setMobileDetailOpen(true);
-              setDeclineOpen(false);
+              setFeedbackMode(null);
             }}
             activeView={view}
             onNavigate={navigate}
@@ -536,7 +579,7 @@ function App() {
         </section>
       </main>
 
-      {mobileDetailOpen || declineOpen ? null : <MobileDock activeView={view} onNavigate={navigate} />}
+      {mobileDetailOpen || feedbackMode ? null : <MobileDock activeView={view} onNavigate={navigate} />}
     </div>
   );
 }
@@ -633,6 +676,7 @@ function InboxScreen({
             <div className="tag-row">
               <span>{shortSalary(featured)}</span>
               <span>{(featured.work_mode || "Role").toUpperCase()}</span>
+              {featured.pack_status === "ready" ? <span>PACK READY</span> : null}
               <span>{formatAge(featured.feedback?.updated_at)}</span>
             </div>
             <div className="featured-why">
@@ -648,7 +692,7 @@ function InboxScreen({
               <span className={`company-mark tint-${index % 4}`}>{initial(job.company)}</span>
               <span className="match-copy">
                 <strong>{job.title}</strong>
-                <small>{job.company.toUpperCase()} · {job.score ?? "--"}%</small>
+                <small>{job.company.toUpperCase()} · {job.score ?? "--"}%{job.pack_status === "ready" ? " · PACK READY" : ""}</small>
               </span>
               <ArrowUpRight size={17} />
             </button>
@@ -664,15 +708,31 @@ function InboxScreen({
 
 function JobReview({
   job,
+  actionNotice,
+  saving,
   onBack,
   onDecline,
-  onFeedback
+  onRevise,
+  onApprove
 }: {
   job: JobDetail;
+  actionNotice: string | null;
+  saving: boolean;
   onBack: () => void;
   onDecline: () => void;
-  onFeedback: (rating: Rating, reasons: string[], note: string) => void;
+  onRevise: () => void;
+  onApprove: () => void;
 }) {
+  const pack = job.application_pack;
+  const statusCopy = actionNotice || (
+    job.status === "bad"
+      ? "Passed. Your decline feedback is saved."
+      : job.status === "maybe"
+        ? "Changes requested. Your feedback is attached in Review."
+        : job.status === "good"
+          ? "Application pack approved."
+          : null
+  );
   return (
     <article className="review-screen">
       <header className="review-hero">
@@ -702,6 +762,12 @@ function JobReview({
       </header>
 
       <div className="screen-body review-body">
+        {statusCopy ? (
+          <div className={`job-status-notice status-${job.status}`} role="status">
+            <CheckCircle2 size={17} />
+            <span>{statusCopy}</span>
+          </div>
+        ) : null}
         <section className="insight-row">
           <span>01</span>
           <div>
@@ -710,14 +776,23 @@ function JobReview({
           </div>
         </section>
 
-        <section className="pack">
+        <section className={`pack pack-${pack?.status || "missing"}`}>
           <div className="pack-header">
             <b>APPLICATION PACK</b>
-            <span>READY</span>
+            <span>{pack?.status === "ready" ? "READY" : pack?.status === "failed" ? "NEEDS ATTENTION" : "PREPARING"}</span>
           </div>
-          <PackRow number="01" title="Fit brief" meta={job.summary ? "Summary generated" : "Needs summary review"} />
-          <PackRow number="02" title="Evidence map" meta={`${evidenceCount(job.fit_evidence)} fit signals`} />
-          <PackRow number="03" title="Manual checklist" meta={`${job.missing_info.length} missing fields`} />
+          {pack?.status === "ready" ? (
+            <>
+              <PackRow number="01" title="Prepared CV" meta={`${pack.resume_pdf_pages || 1}-page PDF · ${pack.resume_name || "Job-specific Base CV copy"}`} href={`/api/jobs/${job.id}/cv.pdf`} />
+              <PackRow number="02" title="Application letter" meta={pack.letter_subject || "German draft"} href={`/api/jobs/${job.id}/application-letter.txt`} download />
+            </>
+          ) : (
+            <p className="pack-state-copy">
+              {pack?.status === "failed"
+                ? pack.error || "The package could not be prepared yet."
+                : "JobFlow is preparing a job-specific Base CV copy and German application letter."}
+            </p>
+          )}
         </section>
 
         <div className="spec-strip">
@@ -730,18 +805,18 @@ function JobReview({
         <ListSection title="Missing information" icon={<ListFilter size={15} />} items={job.missing_info} empty="No obvious missing fields." />
         <ListSection title="Hard gate concerns" icon={<Circle size={15} />} items={job.hard_gate_reasons} empty="No hard gate concern preserved." />
         <ListSection title="Responsibilities" icon={<BriefcaseBusiness size={15} />} items={job.responsibilities} empty="No responsibilities extracted." />
-        <ListSection title="Requirements" icon={<Sparkles size={15} />} items={job.requirements} empty="No requirements extracted." />
+        <ListSection title="Requirements" icon={<ClipboardCheck size={15} />} items={job.requirements} empty="No requirements extracted." />
       </div>
 
       <footer className="review-actions">
-        <button className="reject-action" type="button" onClick={onDecline} aria-label="Decline role">
+        <button className="reject-action" type="button" onClick={onDecline} aria-label="Decline role" disabled={saving}>
           <Trash2 size={18} />
         </button>
-        <button className="revise-action" type="button" onClick={() => onFeedback("maybe", quickReasons.maybe.slice(0, 1), "")}>
-          REVISE
+        <button className="revise-action" type="button" onClick={onRevise} disabled={saving}>
+          REQUEST CHANGES
         </button>
-        <button className="approve-action" type="button" onClick={() => onFeedback("good", quickReasons.good.slice(0, 2), "")}>
-          APPROVE PACK <ArrowRight size={16} />
+        <button className="approve-action" type="button" onClick={onApprove} disabled={saving || pack?.status !== "ready"}>
+          {saving ? "SAVING…" : "APPROVE PACK"} <ArrowRight size={16} />
         </button>
       </footer>
     </article>
@@ -750,16 +825,23 @@ function JobReview({
 
 function DeclineFeedback({
   job,
+  mode,
+  saving,
   onClose,
   onFeedback
 }: {
   job: JobDetail;
+  mode: "decline" | "revise";
+  saving: boolean;
   onClose: () => void;
   onFeedback: (reasons: string[], note: string) => void;
 }) {
-  const initialReasons = job.feedback?.rating === "bad" ? job.feedback.reasons : [];
+  const targetRating: Rating = mode === "decline" ? "bad" : "maybe";
+  const options = quickReasons[targetRating];
+  const initialReasons = job.feedback?.rating === targetRating ? job.feedback.reasons : [];
   const [reasons, setReasons] = React.useState<string[]>(initialReasons);
-  const [note, setNote] = React.useState(job.feedback?.rating === "bad" ? job.feedback.note : "");
+  const [note, setNote] = React.useState(job.feedback?.rating === targetRating ? job.feedback.note : "");
+  const canSubmit = reasons.length > 0 || note.trim().length > 0;
 
   function toggleReason(reason: string) {
     setReasons((current) => (current.includes(reason) ? current.filter((item) => item !== reason) : [...current, reason]));
@@ -774,8 +856,12 @@ function DeclineFeedback({
           </button>
           <span className="micro">TEACH THE AGENT</span>
         </div>
-        <h1>Pass on this.<br />Improve the next.</h1>
-        <p className="decline-lead">Every no becomes a sharper filter for tomorrow's search.</p>
+        <h1>{mode === "decline" ? <>Pass on this.<br />Improve the next.</> : <>What should<br />change?</>}</h1>
+        <p className="decline-lead">
+          {mode === "decline"
+            ? "Every no becomes a sharper filter for tomorrow's search."
+            : "Add the reason first. The job will move to Review with this feedback attached."}
+        </p>
 
         <div className="decline-ticket">
           <span className="company-mark dark">{initial(job.company)}</span>
@@ -788,10 +874,10 @@ function DeclineFeedback({
 
         <section className="decline-reasons">
           <div className="section-head">
-            <h2>What missed?</h2>
+            <h2>{mode === "decline" ? "What missed?" : "What needs another look?"}</h2>
             <span>{reasons.length} SELECTED</span>
           </div>
-          {quickReasons.bad.map((reason, index) => (
+          {options.map((reason, index) => (
             <button type="button" key={reason} className={reasons.includes(reason) ? "chosen" : ""} onClick={() => toggleReason(reason)}>
               <span>{String(index + 1).padStart(2, "0")}</span>
               <b>{reason}</b>
@@ -801,8 +887,12 @@ function DeclineFeedback({
         </section>
 
         <label className="note-field">
-          <span>ADD CONTEXT · OPTIONAL</span>
-          <textarea value={note} onChange={(event) => setNote(event.target.value)} placeholder="I only want fully remote roles above EUR 90k..." />
+          <span>ADD CONTEXT · {reasons.length ? "OPTIONAL" : "REQUIRED"}</span>
+          <textarea
+            value={note}
+            onChange={(event) => setNote(event.target.value)}
+            placeholder={mode === "decline" ? "Why is this not for you?" : "What should change in the CV, letter, or fit analysis?"}
+          />
         </label>
 
         <div className="learning-line">
@@ -811,8 +901,8 @@ function DeclineFeedback({
         </div>
       </div>
       <footer className="decline-submit">
-        <button type="button" onClick={() => onFeedback(reasons, note)}>
-          DECLINE + UPDATE AGENT <ArrowRight size={16} />
+        <button type="button" disabled={!canSubmit || saving} onClick={() => onFeedback(reasons, note)}>
+          {saving ? "SAVING…" : mode === "decline" ? "DECLINE + SAVE FEEDBACK" : "MOVE TO REVIEW"} <ArrowRight size={16} />
         </button>
       </footer>
     </article>
@@ -1398,7 +1488,7 @@ function DiscoveryOperationsPanel({
 
       <div className="operation-block">
         <div className="operation-heading">
-          <div><b>Vienna schedule</b><small>{schedule.timezone}</small></div>
+          <div><b>Search times</b><small>{schedule.timezone}</small></div>
           <button
             type="button"
             className={schedule.enabled ? "mini-toggle on" : "mini-toggle"}
@@ -1406,10 +1496,13 @@ function DiscoveryOperationsPanel({
             aria-label={schedule.enabled ? "Pause scheduled discovery" : "Enable scheduled discovery"}
           ><i /></button>
         </div>
+        <p className="schedule-explainer">
+          Every selected time runs the same complete flow: crawl sources → remove duplicates → evaluate fit → add visible jobs → prepare CV + letter. The repetition only catches newly posted roles during the day.
+        </p>
         <div className="schedule-times">
           {schedule.times.map((time, index) => (
             <label key={`${index}-${time}`}>
-              <span>RUN {index + 1}</span>
+              <span>TIME {index + 1}</span>
               <input
                 type="time"
                 value={time}
@@ -1453,11 +1546,14 @@ function DiscoveryOperationsPanel({
       ) : null}
 
       <div className="operation-block run-history">
-        <div className="operation-heading"><div><b>Run history</b><small>Recent manual and scheduled searches.</small></div></div>
+        <div className="operation-heading"><div><b>Execution history</b><small>Every row is one complete pipeline execution—scheduled or Search now.</small></div></div>
         {operations.recent_runs.slice(0, 5).map((run) => (
           <div className="run-row" key={run.id}>
             <span className={`run-state ${run.status}`} />
-            <span><b>{run.status === "succeeded" ? `${run.unique_count} candidates` : run.status}</b><small>{run.trigger} · {formatDateTime(run.started_at)}{run.error ? ` · ${run.error}` : ""}</small></span>
+            <span>
+              <b>{run.status === "succeeded" ? `${run.unique_count} found → ${run.jobs_added} new jobs → ${run.packs_prepared} packs` : run.status}</b>
+              <small>{run.trigger === "manual" ? "Search now" : "Scheduled"} · {formatDateTime(run.started_at)}{run.error ? ` · ${run.error}` : ""}</small>
+            </span>
           </div>
         ))}
         {operations.recent_runs.length === 0 ? <p className="operations-empty">No searches have run yet.</p> : null}
@@ -1690,16 +1786,35 @@ function EditorArea({ label, value, onChange, compact = false }: { label: string
   );
 }
 
-function PackRow({ number, title, meta }: { number: string; title: string; meta: string }) {
-  return (
-    <div className="pack-row">
+function PackRow({
+  number,
+  title,
+  meta,
+  href,
+  download = false
+}: {
+  number: string;
+  title: string;
+  meta: string;
+  href?: string;
+  download?: boolean;
+}) {
+  const content = (
+    <>
       <span>{number}</span>
       <div>
         <b>{title}</b>
         <small>{meta}</small>
       </div>
       <ArrowUpRight size={16} />
-    </div>
+    </>
+  );
+  return href ? (
+    <a className="pack-row" href={href} target={download ? undefined : "_blank"} rel={download ? undefined : "noreferrer"} download={download}>
+      {content}
+    </a>
+  ) : (
+    <div className="pack-row">{content}</div>
   );
 }
 

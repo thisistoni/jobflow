@@ -74,6 +74,35 @@ class ReactiveResumeClient:
             raise ReactiveResumeError("Reactive Resume detail response was not an object")
         return payload
 
+    def duplicate_resume(self, resume_id: str, *, name: str, slug: str, tags: list[str]) -> str:
+        payload = self._request_json(
+            "POST",
+            f"/resumes/{urllib.parse.quote(resume_id, safe='')}/duplicate",
+            {"name": name, "slug": slug, "tags": tags},
+        )
+        if not isinstance(payload, str) or not payload:
+            raise ReactiveResumeError("Reactive Resume duplicate response was not an ID")
+        return payload
+
+    def patch_resume(
+        self,
+        resume_id: str,
+        *,
+        operations: list[dict[str, Any]],
+        expected_updated_at: str | None,
+    ) -> dict[str, Any]:
+        payload: dict[str, Any] = {"operations": operations}
+        if expected_updated_at:
+            payload["expectedUpdatedAt"] = expected_updated_at
+        result = self._request_json(
+            "PATCH",
+            f"/resumes/{urllib.parse.quote(resume_id, safe='')}",
+            payload,
+        )
+        if not isinstance(result, dict):
+            raise ReactiveResumeError("Reactive Resume patch response was not an object")
+        return result
+
     def export_pdf(self, resume_id: str) -> bytes:
         raw, content_type = self._request(
             "GET",
@@ -85,8 +114,14 @@ class ReactiveResumeClient:
             raise ReactiveResumeError("Reactive Resume did not return a PDF")
         return raw
 
-    def _request_json(self, method: str, path: str) -> Any:
-        raw, content_type = self._request(method, path, accept="application/json", max_bytes=MAX_JSON_BYTES)
+    def _request_json(self, method: str, path: str, payload: Any | None = None) -> Any:
+        raw, content_type = self._request(
+            method,
+            path,
+            accept="application/json",
+            max_bytes=MAX_JSON_BYTES,
+            payload=payload,
+        )
         if "application/json" not in content_type.lower():
             raise ReactiveResumeError("Reactive Resume returned an unexpected content type")
         try:
@@ -94,11 +129,24 @@ class ReactiveResumeClient:
         except json.JSONDecodeError as exc:
             raise ReactiveResumeError("Reactive Resume returned invalid JSON") from exc
 
-    def _request(self, method: str, path: str, *, accept: str, max_bytes: int) -> tuple[bytes, str]:
+    def _request(
+        self,
+        method: str,
+        path: str,
+        *,
+        accept: str,
+        max_bytes: int,
+        payload: Any | None = None,
+    ) -> tuple[bytes, str]:
+        body = json.dumps(payload).encode("utf-8") if payload is not None else None
+        headers = {"x-api-key": self._api_key, "Accept": accept}
+        if body is not None:
+            headers["Content-Type"] = "application/json"
         request = urllib.request.Request(
             self.base_url + path,
+            data=body,
             method=method,
-            headers={"x-api-key": self._api_key, "Accept": accept},
+            headers=headers,
         )
         try:
             with self._opener.open(request, timeout=30) as response:

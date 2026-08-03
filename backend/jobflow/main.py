@@ -7,6 +7,7 @@ import hashlib
 import hmac
 import json
 import os
+import re
 import secrets
 import time
 import uuid
@@ -23,6 +24,7 @@ from fastapi.responses import JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
+from .application_pipeline import analyze_karriere_job, build_application_draft
 from .agentmail import (
     AgentMailConfigError,
     AgentMailProviderError,
@@ -33,8 +35,16 @@ from .agentmail import (
 from .database import connect, decode_json, encode_json, init_db, utc_now
 from .firecrawl import FirecrawlConfigError, FirecrawlProviderError, scrape_url, search_web
 from .importer import _stable_id, canonicalize_url
+from .karriere_camofox import (
+    CamofoxConfigError,
+    CamofoxProviderError,
+    KarriereJobDetail,
+    camofox_available,
+    crawl_karriere,
+)
 from .models import (
     ActivityItem,
+    ApplicationPackOut,
     DailyPulseItem,
     DashboardPulseOut,
     DiscoveryConfigIn,
@@ -48,6 +58,7 @@ from .models import (
     DiscoverySearchIn,
     DiscoverySearchResult,
     DiscoverySourceConfig,
+    EvidenceItem,
     FeedbackIn,
     FeedbackOut,
     JobAnalysisIn,
@@ -243,16 +254,17 @@ def ingest_job(payload: JobIngestIn) -> JobDetail:
         db.execute(
             """
             INSERT INTO jobs (
-                id, source_name, source_url, title, company, location,
+                id, source_id, source_name, source_url, title, company, location,
                 raw_description, extracted_description, status, fit_evidence_json,
                 source_evidence_json, missing_info_json, hard_gate_reasons_json,
                 requirements_json, responsibilities_json, technologies_json,
                 first_seen_at, updated_at
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'inbox', ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'inbox', ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 job_id,
+                payload.source_id,
                 payload.source_name,
                 source_url,
                 payload.title,
@@ -314,6 +326,36 @@ def get_job(job_id: str) -> JobDetail:
         raise HTTPException(status_code=404, detail="Job not found")
     item = _job_detail(row)
     return item
+
+
+@app.get("/api/jobs/{job_id}/cv.pdf")
+def get_job_cv(job_id: str) -> Response:
+    pack = _application_pack(job_id)
+    if pack is None or pack.status != "ready" or not pack.resume_id:
+        raise HTTPException(status_code=404, detail="Prepared CV is not ready")
+    try:
+        _, client = _configured_reactive_resume_client()
+        pdf = client.export_pdf(pack.resume_id)
+    except (ReactiveResumeError, SecretStoreError, ValueError) as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+    return Response(
+        content=pdf,
+        media_type="application/pdf",
+        headers={"Content-Disposition": f'inline; filename="jobflow-{job_id[:12]}-cv.pdf"'},
+    )
+
+
+@app.get("/api/jobs/{job_id}/application-letter.txt")
+def get_job_application_letter(job_id: str) -> Response:
+    pack = _application_pack(job_id)
+    if pack is None or pack.status != "ready" or not pack.letter_body:
+        raise HTTPException(status_code=404, detail="Application letter is not ready")
+    body = f"{pack.letter_subject or 'Bewerbung'}\n\n{pack.letter_body}\n"
+    return Response(
+        content=body.encode("utf-8"),
+        media_type="text/plain; charset=utf-8",
+        headers={"Content-Disposition": f'attachment; filename="jobflow-{job_id[:12]}-anschreiben.txt"'},
+    )
 
 
 @app.put("/api/jobs/{job_id}/analysis", response_model=JobDetail)
@@ -882,27 +924,34 @@ def _discovery_operations() -> DiscoveryOperationsOut:
         times=decode_json(config["schedule_times_json"], ["07:00", "13:00", "19:00"]),
     )
     provider_ready = bool(os.environ.get("FIRECRAWL_API_URL") and os.environ.get("FIRECRAWL_API_KEY"))
+    camofox_ready = camofox_available()
     sources: list[DiscoverySourceConfig] = []
     for row in source_rows:
         status = row["status"]
         detail = row["detail"]
+        label = row["label"]
         if row["id"] in {"open_web", "company_careers"} and not provider_ready:
             status = "setup_required"
             detail = "Configure the JobFlow search provider before enabling this source."
         if row["id"] == "karriere_alerts":
-            if agentmail_configured() and karriere_alerts_active():
+            if camofox_ready:
                 status = "available"
-                detail = "Official Job Alarm links are ingested from the configured AgentMail inbox."
+                label = "karriere.at via Camofox"
+                detail = "Crawls public search and job-detail pages, then normalizes new jobs into JobFlow."
+            elif agentmail_configured() and karriere_alerts_active():
+                status = "available"
+                label = "karriere.at Job Alarm fallback"
+                detail = "Camofox is unavailable; official Job Alarm links remain connected as a fallback."
             elif agentmail_configured():
                 status = "setup_required"
-                detail = "AgentMail is connected; karriere.at account confirmation is still pending."
+                detail = "Camofox is unavailable; AgentMail is connected as a fallback."
             else:
                 status = "setup_required"
-                detail = "Connect the AgentMail inbox used for official karriere.at Job Alarms."
+                detail = "Connect JobFlow to the private Camofox browser service."
         sources.append(
             DiscoverySourceConfig(
                 id=row["id"],
-                label=row["label"],
+                label=label,
                 enabled=bool(row["enabled"]),
                 status=status,
                 detail=detail,
@@ -966,6 +1015,7 @@ def _execute_discovery(trigger: Literal["manual", "scheduled"]) -> DiscoveryRunO
             raise HTTPException(status_code=400, detail="Add at least one role or custom search phrase")
         candidates: dict[str, DiscoveryRunResult] = {}
         candidate_count = 0
+        karriere_details: list[KarriereJobDetail] = []
         if web_enabled:
             for query in queries:
                 results = search_web(query, preferences.discovery_limit_per_query)
@@ -987,25 +1037,41 @@ def _execute_discovery(trigger: Literal["manual", "scheduled"]) -> DiscoveryRunO
                     elif query not in candidate.matched_queries:
                         candidate.matched_queries.append(query)
         if "karriere_alerts" in enabled_sources:
-            with connect() as db:
-                seen_ids = {row["message_id"] for row in db.execute("SELECT message_id FROM agentmail_messages")}
-            alerts = fetch_karriere_alerts(seen_ids)
-            candidate_count += len(alerts.candidates)
-            for item in alerts.candidates:
-                candidate = candidates.get(item.url)
-                if candidate is None:
+            if camofox_available():
+                raw_count, karriere_details = crawl_karriere(
+                    queries,
+                    limit_per_query=preferences.discovery_limit_per_query,
+                    max_details=8,
+                )
+                candidate_count += raw_count
+                for item in karriere_details:
                     candidates[item.url] = DiscoveryRunResult(
                         url=item.url,
                         title=item.title,
-                        description="Official karriere.at Job Alarm link.",
-                        source="karriere_alerts",
-                        matched_queries=["karriere.at Job Alarm"],
+                        description=f"{item.company} · {item.location or 'location unavailable'}",
+                        source="karriere_camofox",
+                        matched_queries=item.matched_queries,
                     )
-            with connect() as db:
-                db.executemany(
-                    "INSERT OR IGNORE INTO agentmail_messages(message_id, received_at, subject, link_count, processed_at) VALUES (?, ?, ?, ?, ?)",
-                    [(item.message_id, item.received_at, item.subject, item.link_count, utc_now()) for item in alerts.messages],
-                )
+            else:
+                with connect() as db:
+                    seen_ids = {row["message_id"] for row in db.execute("SELECT message_id FROM agentmail_messages")}
+                alerts = fetch_karriere_alerts(seen_ids)
+                candidate_count += len(alerts.candidates)
+                for item in alerts.candidates:
+                    candidate = candidates.get(item.url)
+                    if candidate is None:
+                        candidates[item.url] = DiscoveryRunResult(
+                            url=item.url,
+                            title=item.title,
+                            description="Official karriere.at Job Alarm link.",
+                            source="karriere_alerts",
+                            matched_queries=["karriere.at Job Alarm"],
+                        )
+                with connect() as db:
+                    db.executemany(
+                        "INSERT OR IGNORE INTO agentmail_messages(message_id, received_at, subject, link_count, processed_at) VALUES (?, ?, ?, ?, ?)",
+                        [(item.message_id, item.received_at, item.subject, item.link_count, utc_now()) for item in alerts.messages],
+                    )
     except (FirecrawlConfigError, FirecrawlProviderError) as exc:
         _finish_failed_discovery_run(run_id, str(exc))
         raise _firecrawl_http_exception(exc) from exc
@@ -1013,6 +1079,12 @@ def _execute_discovery(trigger: Literal["manual", "scheduled"]) -> DiscoveryRunO
         _finish_failed_discovery_run(run_id, str(exc))
         raise HTTPException(status_code=503, detail=str(exc)) from exc
     except AgentMailProviderError as exc:
+        _finish_failed_discovery_run(run_id, str(exc))
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+    except CamofoxConfigError as exc:
+        _finish_failed_discovery_run(run_id, str(exc))
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    except CamofoxProviderError as exc:
         _finish_failed_discovery_run(run_id, str(exc))
         raise HTTPException(status_code=502, detail=str(exc)) from exc
     except HTTPException as exc:
@@ -1024,6 +1096,10 @@ def _execute_discovery(trigger: Literal["manual", "scheduled"]) -> DiscoveryRunO
 
     finished_at = utc_now()
     result_items = list(candidates.values())
+    jobs_added, jobs_evaluated, packs_prepared = _promote_karriere_details(
+        karriere_details,
+        preferences,
+    )
     with connect() as db:
         db.executemany(
             """
@@ -1038,10 +1114,19 @@ def _execute_discovery(trigger: Literal["manual", "scheduled"]) -> DiscoveryRunO
         db.execute(
             """
             UPDATE discovery_runs
-            SET status = 'succeeded', finished_at = ?, candidate_count = ?, unique_count = ?
+            SET status = 'succeeded', finished_at = ?, candidate_count = ?, unique_count = ?,
+                jobs_added = ?, jobs_evaluated = ?, packs_prepared = ?
             WHERE id = ?
             """,
-            (finished_at, candidate_count, len(result_items), run_id),
+            (
+                finished_at,
+                candidate_count,
+                len(result_items),
+                jobs_added,
+                jobs_evaluated,
+                packs_prepared,
+                run_id,
+            ),
         )
         db.execute(
             """
@@ -1051,7 +1136,7 @@ def _execute_discovery(trigger: Literal["manual", "scheduled"]) -> DiscoveryRunO
             (
                 str(uuid.uuid4()),
                 "Discovery search completed",
-                f"{len(result_items)} unique candidates from {len(queries)} searches.",
+                f"{len(result_items)} unique candidates · {jobs_added} new jobs · {packs_prepared} prepared packs.",
                 finished_at,
             ),
         )
@@ -1060,6 +1145,214 @@ def _execute_discovery(trigger: Literal["manual", "scheduled"]) -> DiscoveryRunO
         queries=queries,
         limit_per_query=preferences.discovery_limit_per_query,
         results=result_items,
+        jobs_added=jobs_added,
+        jobs_evaluated=jobs_evaluated,
+        packs_prepared=packs_prepared,
+    )
+
+
+def _promote_karriere_details(
+    details: list[KarriereJobDetail],
+    preferences: Preferences,
+) -> tuple[int, int, int]:
+    jobs_added = 0
+    jobs_evaluated = 0
+    packs_prepared = 0
+    for detail in details:
+        with connect() as db:
+            existing = db.execute(
+                "SELECT id, status, score FROM jobs WHERE source_url = ?",
+                (detail.url,),
+            ).fetchone()
+        created = ingest_job(
+            JobIngestIn(
+                source_id=detail.source_id,
+                source_name="karriere.at",
+                source_url=detail.url,
+                title=detail.title,
+                company=detail.company,
+                location=detail.location,
+                raw_description=detail.description,
+                extracted_description=detail.description,
+            )
+        )
+        if existing is None:
+            jobs_added += 1
+        if created.status == "bad":
+            continue
+        analysis = analyze_karriere_job(detail, preferences)
+        if existing is None or existing["score"] is None:
+            update_job_analysis(created.id, analysis)
+            jobs_evaluated += 1
+        if analysis.score >= 55 and _prepare_application_pack(created.id, detail, analysis):
+            packs_prepared += 1
+    return jobs_added, jobs_evaluated, packs_prepared
+
+
+def _prepare_application_pack(
+    job_id: str,
+    detail: KarriereJobDetail,
+    analysis: JobAnalysisIn,
+) -> bool:
+    existing = _application_pack(job_id)
+    if existing is not None and existing.status == "ready":
+        return False
+    draft = build_application_draft(detail, analysis)
+    now = utc_now()
+    _store_application_pack(
+        job_id,
+        status="preparing",
+        letter_subject=draft.subject,
+        letter_body=draft.body,
+        error=None,
+        now=now,
+    )
+    try:
+        config, client = _configured_reactive_resume_client()
+        reference_id = config["reference_resume_id"]
+        if not reference_id:
+            raise ReactiveResumeError("Base CV is not selected")
+        slug = f"jobflow-{job_id[:16]}"
+        resume_name = f"{detail.company} · {detail.title}"[:160]
+        resume_id = next(
+            (
+                str(item["id"])
+                for item in client.list_resumes()
+                if str(item.get("slug", "")) == slug and item.get("id")
+            ),
+            "",
+        )
+        if not resume_id:
+            resume_id = client.duplicate_resume(
+                reference_id,
+                name=resume_name,
+                slug=slug,
+                tags=["jobflow", "prepared"],
+            )
+        resume = client.get_resume(resume_id)
+        operations = [
+            {"op": "replace", "path": "/basics/headline", "value": draft.resume_headline},
+            {"op": "replace", "path": "/summary/content", "value": draft.resume_summary_html},
+        ]
+        try:
+            client.patch_resume(
+                resume_id,
+                operations=operations,
+                expected_updated_at=str(resume.get("updatedAt")) if resume.get("updatedAt") else None,
+            )
+        except ReactiveResumeError as exc:
+            if "HTTP 409" not in str(exc):
+                raise
+            # This is a new JobFlow-owned duplicate. Reactive Resume can serialize
+            # timestamps at lower precision than its database; retrying without the
+            # optimistic timestamp is bounded to these two deterministic fields.
+            client.patch_resume(resume_id, operations=operations, expected_updated_at=None)
+        verified = client.get_resume(resume_id)
+        raw_data = verified.get("data")
+        data: dict[str, Any] = raw_data if isinstance(raw_data, dict) else {}
+        raw_basics = data.get("basics")
+        basics: dict[str, Any] = raw_basics if isinstance(raw_basics, dict) else {}
+        raw_summary = data.get("summary")
+        summary: dict[str, Any] = raw_summary if isinstance(raw_summary, dict) else {}
+        if basics.get("headline") != draft.resume_headline or summary.get("content") != draft.resume_summary_html:
+            raise ReactiveResumeError("Job-specific CV read-back verification failed")
+        pdf = client.export_pdf(resume_id)
+        pages = len(re.findall(rb"/Type\s*/Page\b", pdf))
+        if pages != 1:
+            raise ReactiveResumeError(f"Job-specific CV rendered to {pages} pages instead of one")
+        _store_application_pack(
+            job_id,
+            status="ready",
+            resume_id=resume_id,
+            resume_name=resume_name,
+            resume_pdf_pages=pages,
+            letter_subject=draft.subject,
+            letter_body=draft.body,
+            error=None,
+            now=utc_now(),
+        )
+        with connect() as db:
+            db.execute(
+                "INSERT INTO activity(id, kind, title, body, job_id, created_at) VALUES (?, 'package', ?, ?, ?, ?)",
+                (
+                    str(uuid.uuid4()),
+                    f"Prepared application pack for {detail.company}",
+                    "Job-specific one-page CV and German application letter are ready.",
+                    job_id,
+                    utc_now(),
+                ),
+            )
+        return True
+    except (HTTPException, ReactiveResumeError, SecretStoreError, ValueError, KeyError) as exc:
+        _store_application_pack(
+            job_id,
+            status="failed",
+            letter_subject=draft.subject,
+            letter_body=draft.body,
+            error=str(exc)[:300],
+            now=utc_now(),
+        )
+        return False
+
+
+def _store_application_pack(
+    job_id: str,
+    *,
+    status: Literal["preparing", "ready", "failed"],
+    now: str,
+    resume_id: str | None = None,
+    resume_name: str | None = None,
+    resume_pdf_pages: int | None = None,
+    letter_subject: str | None = None,
+    letter_body: str | None = None,
+    error: str | None = None,
+) -> None:
+    with connect() as db:
+        db.execute(
+            """
+            INSERT INTO application_packs(
+                job_id, status, resume_id, resume_name, resume_pdf_pages,
+                letter_subject, letter_body, error, created_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(job_id) DO UPDATE SET
+                status = excluded.status,
+                resume_id = COALESCE(excluded.resume_id, application_packs.resume_id),
+                resume_name = COALESCE(excluded.resume_name, application_packs.resume_name),
+                resume_pdf_pages = COALESCE(excluded.resume_pdf_pages, application_packs.resume_pdf_pages),
+                letter_subject = COALESCE(excluded.letter_subject, application_packs.letter_subject),
+                letter_body = COALESCE(excluded.letter_body, application_packs.letter_body),
+                error = excluded.error,
+                updated_at = excluded.updated_at
+            """,
+            (
+                job_id,
+                status,
+                resume_id,
+                resume_name,
+                resume_pdf_pages,
+                letter_subject,
+                letter_body,
+                error,
+                now,
+                now,
+            ),
+        )
+
+
+def _application_pack(job_id: str) -> ApplicationPackOut | None:
+    with connect() as db:
+        row = db.execute("SELECT * FROM application_packs WHERE job_id = ?", (job_id,)).fetchone()
+    if row is None:
+        return None
+    return ApplicationPackOut(
+        status=row["status"],
+        resume_id=row["resume_id"],
+        resume_name=row["resume_name"],
+        resume_pdf_pages=row["resume_pdf_pages"],
+        letter_subject=row["letter_subject"],
+        letter_body=row["letter_body"],
+        error=row["error"],
+        updated_at=row["updated_at"],
     )
 
 
@@ -1089,6 +1382,9 @@ def _discovery_run_summary(row: Any) -> DiscoveryRunSummary:
         queries=decode_json(row["queries_json"], []),
         candidate_count=row["candidate_count"],
         unique_count=row["unique_count"],
+        jobs_added=row["jobs_added"],
+        jobs_evaluated=row["jobs_evaluated"],
+        packs_prepared=row["packs_prepared"],
         error=row["error"],
     )
 
@@ -1153,6 +1449,7 @@ def _feedback_from_row(row: Any) -> FeedbackOut | None:
 
 
 def _job_list_item(row: Any) -> JobListItem:
+    pack = _application_pack(row["id"])
     return JobListItem(
         id=row["id"],
         title=row["title"],
@@ -1168,17 +1465,40 @@ def _job_list_item(row: Any) -> JobListItem:
         missing_info=decode_json(row["missing_info_json"], []),
         source_url=row["source_url"],
         feedback=_feedback_from_row(row),
+        pack_status=pack.status if pack is not None else None,
     )
+
+
+def _normalized_fit_evidence(value: Any) -> dict[str, list[EvidenceItem]]:
+    if not isinstance(value, dict):
+        return {}
+    normalized: dict[str, list[EvidenceItem]] = {}
+    for key, raw_items in value.items():
+        items = raw_items if isinstance(raw_items, list) else [raw_items]
+        cleaned: list[EvidenceItem] = []
+        for item in items:
+            if isinstance(item, str) and item.strip():
+                cleaned.append(EvidenceItem(origin="legacy import", text=item.strip()))
+            elif isinstance(item, dict) and isinstance(item.get("text"), str) and item["text"].strip():
+                cleaned.append(EvidenceItem(
+                    origin=str(item.get("origin")) if item.get("origin") else None,
+                    text=item["text"].strip(),
+                    profile_fact_ref=str(item.get("profile_fact_ref")) if item.get("profile_fact_ref") else None,
+                ))
+        if cleaned:
+            normalized[str(key)] = cleaned
+    return normalized
 
 
 def _job_detail(row: Any) -> JobDetail:
     base = _job_list_item(row).model_dump()
+    pack = _application_pack(row["id"])
     return JobDetail(
         **base,
         source_name=row["source_name"],
         raw_description=row["raw_description"],
         extracted_description=row["extracted_description"],
-        fit_evidence=decode_json(row["fit_evidence_json"], {}),
+        fit_evidence=_normalized_fit_evidence(decode_json(row["fit_evidence_json"], {})),
         source_evidence=decode_json(row["source_evidence_json"], {}),
         hard_gate_reasons=decode_json(row["hard_gate_reasons_json"], []),
         requirements=decode_json(row["requirements_json"], []),
@@ -1193,6 +1513,7 @@ def _job_detail(row: Any) -> JobDetail:
         first_seen_at=row["first_seen_at"],
         updated_at=row["updated_at"],
         reviewed_at=row["reviewed_at"],
+        application_pack=pack,
     )
 
 

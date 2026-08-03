@@ -16,6 +16,17 @@ class FeedbackOut(BaseModel):
     updated_at: str
 
 
+class ApplicationPackOut(BaseModel):
+    status: Literal["preparing", "ready", "failed"]
+    resume_id: str | None = None
+    resume_name: str | None = None
+    resume_pdf_pages: int | None = None
+    letter_subject: str | None = None
+    letter_body: str | None = None
+    error: str | None = None
+    updated_at: str
+
+
 class JobListItem(BaseModel):
     id: str
     title: str
@@ -31,6 +42,7 @@ class JobListItem(BaseModel):
     missing_info: list[str] = Field(default_factory=list)
     source_url: str
     feedback: FeedbackOut | None = None
+    pack_status: Literal["preparing", "ready", "failed"] | None = None
 
 
 class EvidenceItem(BaseModel):
@@ -58,6 +70,7 @@ class JobDetail(JobListItem):
     first_seen_at: str
     updated_at: str
     reviewed_at: str | None = None
+    application_pack: ApplicationPackOut | None = None
 
 
 class FeedbackIn(BaseModel):
@@ -68,6 +81,7 @@ class FeedbackIn(BaseModel):
 
 class JobIngestIn(BaseModel):
     source_url: str = Field(min_length=1)
+    source_id: str | None = Field(default=None, max_length=120)
     title: str = Field(min_length=1, max_length=500)
     company: str = Field(min_length=1, max_length=300)
     location: str | None = Field(default=None, max_length=300)
@@ -193,6 +207,9 @@ class DiscoveryRunOut(BaseModel):
     queries: list[str]
     limit_per_query: int
     results: list[DiscoveryRunResult]
+    jobs_added: int = 0
+    jobs_evaluated: int = 0
+    packs_prepared: int = 0
 
 
 class DiscoverySourceConfig(BaseModel):
@@ -243,6 +260,9 @@ class DiscoveryRunSummary(BaseModel):
     queries: list[str] = Field(default_factory=list)
     candidate_count: int = 0
     unique_count: int = 0
+    jobs_added: int = 0
+    jobs_evaluated: int = 0
+    packs_prepared: int = 0
     error: str | None = None
 
 
