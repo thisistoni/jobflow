@@ -41,6 +41,7 @@ from .karriere_camofox import (
     KarriereJobDetail,
     camofox_available,
     crawl_karriere,
+    refresh_karriere_detail,
 )
 from .letter_pdf import render_application_letter_pdf
 from .models import (
@@ -1185,6 +1186,7 @@ def _execute_discovery(trigger: Literal["manual", "scheduled"]) -> DiscoveryRunO
                         "INSERT OR IGNORE INTO agentmail_messages(message_id, received_at, subject, link_count, processed_at) VALUES (?, ?, ?, ?, ?)",
                         [(item.message_id, item.received_at, item.subject, item.link_count, utc_now()) for item in alerts.messages],
                     )
+            _append_untrusted_karriere_details(karriere_details)
     except (FirecrawlConfigError, FirecrawlProviderError) as exc:
         _finish_failed_discovery_run(run_id, str(exc))
         raise _firecrawl_http_exception(exc) from exc
@@ -1340,6 +1342,42 @@ def _promote_karriere_details(
         ):
             packs_prepared += 1
     return jobs_added, jobs_evaluated, packs_prepared
+
+
+def _append_untrusted_karriere_details(
+    details: list[KarriereJobDetail],
+    *,
+    max_details: int = 12,
+) -> None:
+    """Boundedly self-heal incomplete Inbox rows omitted by current listings."""
+    seen = {detail.url for detail in details}
+    with connect() as db:
+        rows = db.execute(
+            """
+            SELECT * FROM jobs
+            WHERE status = 'inbox'
+              AND source_name = 'karriere.at'
+              AND source_url LIKE 'https://www.karriere.at/jobs/%'
+              AND (
+                LENGTH(TRIM(COALESCE(extracted_description, ''))) < 180
+                OR requirements_json = '[]'
+                OR responsibilities_json = '[]'
+              )
+            ORDER BY updated_at DESC
+            LIMIT ?
+            """,
+            (max_details,),
+        ).fetchall()
+    for row in rows:
+        if row["source_url"] in seen:
+            continue
+        detail = _karriere_detail_from_row(row)
+        try:
+            refresh_karriere_detail(detail)
+        except CamofoxProviderError:
+            continue
+        details.append(detail)
+        seen.add(detail.url)
 
 
 def _prepare_application_pack(

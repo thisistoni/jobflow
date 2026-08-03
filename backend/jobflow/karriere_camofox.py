@@ -194,7 +194,7 @@ def crawl_karriere(
                     # candidate; never abort the rest of a multi-job run.
                     continue
                 try:
-                    _enrich_detail_from_job_posting(detail, _fetch_job_posting(listing.url))
+                    refresh_karriere_detail(detail)
                 except CamofoxProviderError:
                     # The browser snapshot remains a bounded fallback. A temporary
                     # structured-data fetch failure must not abort the full run.
@@ -209,6 +209,12 @@ def crawl_karriere(
         return raw_count, details
     finally:
         client.close_tab(tab_id)
+
+
+def refresh_karriere_detail(detail: KarriereJobDetail) -> KarriereJobDetail:
+    """Refresh one canonical Karriere record from its public JobPosting JSON-LD."""
+    _enrich_detail_from_job_posting(detail, _fetch_job_posting(detail.url))
+    return detail
 
 
 def parse_search_snapshot(snapshot: str) -> list[KarriereListing]:

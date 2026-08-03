@@ -15,7 +15,7 @@ from jobflow.karriere_camofox import (
     parse_detail_snapshot,
     parse_search_snapshot,
 )
-from jobflow.models import Preferences
+from jobflow.models import JobIngestIn, Preferences
 
 
 SEARCH_SNAPSHOT = '''
@@ -322,3 +322,40 @@ def test_work_mode_variants_and_home_office_days_are_preserved() -> None:
         )
         assert not any("Work mode does not match" in reason for reason in analysis.hard_gate_reasons)
         assert analysis.home_office_days == detail.home_office_days
+
+
+def test_incomplete_historical_jobs_are_backfilled_from_canonical_source(
+    tmp_path: Path,
+    monkeypatch: Any,
+) -> None:
+    db_path = tmp_path / "backfill.sqlite3"
+    os.environ["JOBFLOW_DB"] = str(db_path)
+    from jobflow.database import init_db
+    import jobflow.main as main
+
+    init_db(db_path)
+    main.ingest_job(
+        JobIngestIn(
+            source_id="987654",
+            source_name="karriere.at",
+            source_url="https://www.karriere.at/jobs/987654",
+            title="Junior Developer",
+            company="Example GmbH",
+            location="Wien",
+            raw_description="Incomplete shell",
+            extracted_description="Incomplete shell",
+        )
+    )
+
+    def fake_refresh(detail: KarriereJobDetail) -> KarriereJobDetail:
+        detail.description = "Complete verified source description. " * 8
+        detail.requirements = ["Python"]
+        detail.responsibilities = ["Build internal tools"]
+        return detail
+
+    monkeypatch.setattr(main, "refresh_karriere_detail", fake_refresh)
+    details: list[KarriereJobDetail] = []
+    main._append_untrusted_karriere_details(details)
+    assert len(details) == 1
+    assert details[0].source_id == "987654"
+    assert details[0].requirements == ["Python"]
