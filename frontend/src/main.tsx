@@ -78,6 +78,10 @@ type ApplicationPack = {
   updated_at: string;
 };
 
+function isUserVisibleJob(job: JobListItem): boolean {
+  return job.pack_status === "ready" || job.status !== "inbox";
+}
+
 type EvidenceItem = {
   origin?: string | null;
   text: string;
@@ -260,8 +264,9 @@ function App() {
   const loadJobs = React.useCallback(async () => {
     setError(null);
     const data = await api<JobListItem[]>(`/api/jobs?filter=${filter}`);
-    setJobs(data);
-    setSelectedId((current) => current ?? data[0]?.id ?? null);
+    const visible = data.filter(isUserVisibleJob);
+    setJobs(visible);
+    setSelectedId((current) => visible.some((job) => job.id === current) ? current : visible[0]?.id ?? null);
   }, [filter]);
 
   React.useEffect(() => {
@@ -297,7 +302,7 @@ function App() {
   React.useEffect(() => {
     if (!isUnlocked) return;
     if (view === "pipeline") {
-      api<JobListItem[]>("/api/jobs?filter=all").then(setPipelineJobs).catch((reason: unknown) => {
+      api<JobListItem[]>("/api/jobs?filter=all").then((data) => setPipelineJobs(data.filter(isUserVisibleJob))).catch((reason: unknown) => {
         if (!handleAuthExpired(reason)) setError(messageFrom(reason));
       });
     }
@@ -784,7 +789,7 @@ function JobReview({
           {pack?.status === "ready" ? (
             <>
               <PackRow number="01" title="Prepared CV" meta={`${pack.resume_pdf_pages || 1}-page PDF · ${pack.resume_name || "Job-specific Base CV copy"}`} href={`/api/jobs/${job.id}/cv.pdf`} />
-              <PackRow number="02" title="Application letter" meta={pack.letter_subject || "German draft"} href={`/api/jobs/${job.id}/application-letter.txt`} download />
+              <PackRow number="02" title="Application letter" meta={`PDF · ${pack.letter_subject || "German application letter"}`} href={`/api/jobs/${job.id}/application-letter.pdf`} />
             </>
           ) : (
             <p className="pack-state-copy">

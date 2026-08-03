@@ -521,7 +521,7 @@ textarea {
   grid-template-columns: 38px minmax(0, 1fr) 17px;
   align-items: center;
   gap: 11px;
-  padding: 12px 2px;
+  padding: 12px 8px 12px 12px;
   border: 0;
   border-bottom: 1px solid var(--line);
   background: transparent;

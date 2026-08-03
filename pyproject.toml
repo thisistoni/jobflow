@@ -13,6 +13,7 @@ dependencies = [
     "pydantic==2.11.7",
     "PyYAML==6.0.2",
     "cryptography==45.0.6",
+    "reportlab==4.4.3",
 ]
 
 [project.optional-dependencies]

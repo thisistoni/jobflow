@@ -42,6 +42,7 @@ from .karriere_camofox import (
     camofox_available,
     crawl_karriere,
 )
+from .letter_pdf import render_application_letter_pdf
 from .models import (
     ActivityItem,
     ApplicationPackOut,
@@ -345,16 +346,25 @@ def get_job_cv(job_id: str) -> Response:
     )
 
 
-@app.get("/api/jobs/{job_id}/application-letter.txt")
+@app.get("/api/jobs/{job_id}/application-letter.pdf")
 def get_job_application_letter(job_id: str) -> Response:
     pack = _application_pack(job_id)
     if pack is None or pack.status != "ready" or not pack.letter_body:
         raise HTTPException(status_code=404, detail="Application letter is not ready")
-    body = f"{pack.letter_subject or 'Bewerbung'}\n\n{pack.letter_body}\n"
+    with connect() as db:
+        job = db.execute("SELECT title, company FROM jobs WHERE id = ?", (job_id,)).fetchone()
+    if job is None:
+        raise HTTPException(status_code=404, detail="Job not found")
+    subject = pack.letter_subject or f"Bewerbung als {job['title']}"
+    pdf = render_application_letter_pdf(
+        company=job["company"],
+        subject=subject,
+        body=pack.letter_body,
+    )
     return Response(
-        content=body.encode("utf-8"),
-        media_type="text/plain; charset=utf-8",
-        headers={"Content-Disposition": f'attachment; filename="jobflow-{job_id[:12]}-anschreiben.txt"'},
+        content=pdf,
+        media_type="application/pdf",
+        headers={"Content-Disposition": f'inline; filename="jobflow-{job_id[:12]}-anschreiben.pdf"'},
     )
 
 
