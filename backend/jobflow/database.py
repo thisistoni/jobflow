@@ -200,6 +200,11 @@ def init_db(path: str | Path | None = None) -> None:
             CREATE TABLE IF NOT EXISTS application_packs (
                 job_id TEXT PRIMARY KEY REFERENCES jobs(id) ON DELETE CASCADE,
                 status TEXT NOT NULL CHECK (status IN ('preparing', 'ready', 'failed')),
+                version INTEGER NOT NULL DEFAULT 1,
+                revision_state TEXT NOT NULL DEFAULT 'current'
+                    CHECK (revision_state IN ('current', 'changes_requested', 'regenerated')),
+                revision_reasons_json TEXT NOT NULL DEFAULT '[]',
+                revision_note TEXT NOT NULL DEFAULT '',
                 resume_id TEXT,
                 resume_name TEXT,
                 resume_pdf_pages INTEGER,
@@ -208,6 +213,21 @@ def init_db(path: str | Path | None = None) -> None:
                 error TEXT,
                 created_at TEXT NOT NULL,
                 updated_at TEXT NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS application_pack_versions (
+                job_id TEXT NOT NULL REFERENCES jobs(id) ON DELETE CASCADE,
+                version INTEGER NOT NULL,
+                revision_state TEXT NOT NULL DEFAULT 'current',
+                revision_reasons_json TEXT NOT NULL DEFAULT '[]',
+                revision_note TEXT NOT NULL DEFAULT '',
+                resume_id TEXT,
+                resume_name TEXT,
+                resume_pdf_pages INTEGER,
+                letter_subject TEXT,
+                letter_body TEXT,
+                created_at TEXT NOT NULL,
+                PRIMARY KEY (job_id, version)
             );
             """
         )
@@ -223,6 +243,10 @@ def init_db(path: str | Path | None = None) -> None:
         _ensure_column(db, "discovery_runs", "jobs_added", "INTEGER NOT NULL DEFAULT 0")
         _ensure_column(db, "discovery_runs", "jobs_evaluated", "INTEGER NOT NULL DEFAULT 0")
         _ensure_column(db, "discovery_runs", "packs_prepared", "INTEGER NOT NULL DEFAULT 0")
+        _ensure_column(db, "application_packs", "version", "INTEGER NOT NULL DEFAULT 1")
+        _ensure_column(db, "application_packs", "revision_state", "TEXT NOT NULL DEFAULT 'current'")
+        _ensure_column(db, "application_packs", "revision_reasons_json", "TEXT NOT NULL DEFAULT '[]'")
+        _ensure_column(db, "application_packs", "revision_note", "TEXT NOT NULL DEFAULT ''")
         now = utc_now()
         db.execute(
             """

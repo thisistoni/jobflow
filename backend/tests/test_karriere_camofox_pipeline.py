@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import os
 from pathlib import Path
 from typing import Any
@@ -7,7 +8,13 @@ from typing import Any
 from fastapi.testclient import TestClient
 
 from jobflow.application_pipeline import analyze_karriere_job
-from jobflow.karriere_camofox import KarriereJobDetail, parse_detail_snapshot, parse_search_snapshot
+from jobflow.karriere_camofox import (
+    KarriereJobDetail,
+    _enrich_detail_from_job_posting,
+    _parse_job_posting_html,
+    parse_detail_snapshot,
+    parse_search_snapshot,
+)
 from jobflow.models import Preferences
 
 
@@ -69,7 +76,12 @@ def _detail(job_id: str = "123456") -> KarriereJobDetail:
         title="Junior Software Entwickler:in",
         company="Example GmbH",
         location="Wien",
-        description="Python SQL Hybrid",
+        description=(
+            "Über den Job\n"
+            "Wir entwickeln interne Webanwendungen für operative Teams und suchen Unterstützung "
+            "bei Python, SQL, Schnittstellen und strukturierten Automatisierungen. "
+            "Die Rolle verbindet Softwareentwicklung, technische Analyse und laufende Verbesserung."
+        ),
         salary_display="ab 4.200 € monatlich",
         salary_min_annual=58_800,
         salary_max_annual=58_800,
@@ -96,8 +108,58 @@ def test_parses_karriere_search_and_detail() -> None:
     shell = parse_detail_snapshot(SHELL_DETAIL_SNAPSHOT, "https://www.karriere.at/jobs/7847111")
     assert shell.title == "Junior Software Developer (all genders)"
     assert shell.company == "PMC International GmbH"
+    assert shell.location is None
     assert shell.requirements == []
     assert "Weitere Jobs" not in shell.description
+
+
+def test_jobposting_structured_data_supplies_source_truth() -> None:
+    shell = parse_detail_snapshot(SHELL_DETAIL_SNAPSHOT, "https://www.karriere.at/jobs/7847111")
+    posting = {
+        "@type": "JobPosting",
+        "title": "Junior Software Developer (all genders)",
+        "hiringOrganization": {"name": "WITTMANN Gruppe"},
+        "jobLocation": [
+            {"address": {"addressLocality": "Kottingbrunn", "addressRegion": "Niederösterreich"}}
+        ],
+        "baseSalary": {
+            "currency": "EUR",
+            "value": {"unitText": "MONTH", "value": 3396.21},
+        },
+        "description": (
+            "<h4>Aufgaben</h4><ul>"
+            "<li>Entwicklung von Softwarelösungen für Spritzgießmaschinen</li>"
+            "<li>Analyse und Implementierung im Team</li></ul>"
+            "<h4>Anforderungsprofil</h4><ul>"
+            "<li>Gute Programmierkenntnisse in C#</li>"
+            "<li>Erfahrung mit IEC 61131-3</li></ul>"
+            "<p>Die Rolle verbindet Maschinenbau und Softwareentwicklung.</p>"
+        ),
+    }
+    page = f'<script type="application/ld+json">{json.dumps({"@graph": [{**posting, "@type": ["Thing", "JobPosting"]}]})}</script>'
+    _enrich_detail_from_job_posting(shell, _parse_job_posting_html(page))
+
+    assert shell.company == "WITTMANN Gruppe"
+    assert shell.location == "Kottingbrunn"
+    assert shell.salary_min_annual == 47_547
+    assert shell.requirements == ["Gute Programmierkenntnisse in C#", "Erfahrung mit IEC 61131-3"]
+    assert shell.responsibilities == [
+        "Entwicklung von Softwarelösungen für Spritzgießmaschinen",
+        "Analyse und Implementierung im Team",
+    ]
+    assert "Maschinenbau und Softwareentwicklung" in shell.description
+
+    rejected = analyze_karriere_job(
+        shell,
+        Preferences(
+            target_locations=["Wien", "AT"],
+            salary_target_min=45_000,
+            acceptable_salary_min=47_500,
+            role_families=["software developer"],
+        ),
+    )
+    assert any("Location does not clearly match" in reason for reason in rejected.hard_gate_reasons)
+    assert not any("salary" in reason.casefold() for reason in rejected.hard_gate_reasons)
 
 
 def test_crawl_skips_one_expired_detail_instead_of_aborting(monkeypatch: Any) -> None:
@@ -128,6 +190,7 @@ def test_crawl_skips_one_expired_detail_instead_of_aborting(monkeypatch: Any) ->
             return None
 
     monkeypatch.setattr(karriere, "CamofoxClient", FakeClient)
+    monkeypatch.setattr(karriere, "_fetch_job_posting", lambda _url: (_ for _ in ()).throw(karriere.CamofoxProviderError("offline")))
     raw, details = karriere.crawl_karriere(["software Wien"], limit_per_query=2, max_details=2)
     assert raw == 2
     assert [item.source_id for item in details] == ["654321"]
@@ -140,7 +203,7 @@ def test_camofox_candidates_become_visible_jobs_and_declines_stay_suppressed(
     db_path = tmp_path / "jobflow.sqlite3"
     os.environ["JOBFLOW_DB"] = str(db_path)
 
-    from jobflow.database import init_db
+    from jobflow.database import init_db, utc_now
     from jobflow.main import app
     import jobflow.main as main
 
@@ -173,10 +236,20 @@ def test_camofox_candidates_become_visible_jobs_and_declines_stay_suppressed(
     )
     prepared: set[str] = set()
 
-    def fake_prepare(job_id: str, *_args: Any) -> bool:
+    def fake_prepare(job_id: str, *_args: Any, **_kwargs: Any) -> bool:
         if job_id in prepared:
             return False
         prepared.add(job_id)
+        main._store_application_pack(
+            job_id,
+            status="ready",
+            resume_id=f"resume-{job_id}",
+            resume_name="Prepared pack",
+            resume_pdf_pages=1,
+            letter_subject="Bewerbung",
+            letter_body="Letter",
+            now=utc_now(),
+        )
         return True
 
     monkeypatch.setattr(main, "_prepare_application_pack", fake_prepare)
@@ -231,3 +304,21 @@ def test_fit_analysis_scores_a_matching_vienna_role() -> None:
     assert analysis.score >= 70
     assert analysis.verdict == "strong"
     assert analysis.salary_min_annual == 58_800
+
+
+def test_work_mode_variants_and_home_office_days_are_preserved() -> None:
+    for mode, wanted in (("Remote", ["remote"]), ("On-site", ["onsite"])):
+        detail = _detail()
+        detail.work_mode = mode
+        detail.home_office_days = 3 if mode == "Remote" else 0
+        analysis = analyze_karriere_job(
+            detail,
+            Preferences(
+                target_locations=["Wien"],
+                work_modes=wanted,
+                salary_target_min=45_000,
+                role_families=["software developer"],
+            ),
+        )
+        assert not any("Work mode does not match" in reason for reason in analysis.hard_gate_reasons)
+        assert analysis.home_office_days == detail.home_office_days

@@ -54,6 +54,11 @@ def test_discovery_operations_generate_queries_persist_history_and_priority_role
     assert all("_" not in query for query in operations.json()["generated_queries"])
     assert operations.json()["next_run_at"]
 
+    broad_target_saved = client.put("/api/preferences", json={**preferences, "target_locations": ["Wien", "AT"]})
+    assert broad_target_saved.status_code == 200
+    broad_target_operations = client.get("/api/discovery/operations").json()
+    assert all(" AT" not in query for query in broad_target_operations["generated_queries"])
+
     unavailable = client.put(
         "/api/discovery/config",
         json={

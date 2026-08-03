@@ -65,10 +65,15 @@ type JobListItem = {
   source_url: string;
   feedback?: Feedback | null;
   pack_status?: "preparing" | "ready" | "failed" | null;
+  pack_revision_state?: "current" | "changes_requested" | "regenerated" | null;
 };
 
 type ApplicationPack = {
   status: "preparing" | "ready" | "failed";
+  version: number;
+  revision_state: "current" | "changes_requested" | "regenerated";
+  revision_reasons: string[];
+  revision_note: string;
   resume_id: string | null;
   resume_name: string | null;
   resume_pdf_pages: number | null;
@@ -76,10 +81,21 @@ type ApplicationPack = {
   letter_body: string | null;
   error: string | null;
   updated_at: string;
+  versions: Array<{
+    version: number;
+    revision_state: "current" | "changes_requested" | "regenerated";
+    revision_reasons: string[];
+    revision_note: string;
+    resume_id: string | null;
+    resume_name: string | null;
+    resume_pdf_pages: number | null;
+    letter_subject: string | null;
+    created_at: string;
+  }>;
 };
 
 function isUserVisibleJob(job: JobListItem): boolean {
-  return job.pack_status === "ready" || job.status !== "inbox";
+  return job.status !== "inbox" || job.pack_status != null;
 }
 
 type EvidenceItem = {
@@ -89,6 +105,8 @@ type EvidenceItem = {
 };
 
 type JobDetail = JobListItem & {
+  raw_description?: string | null;
+  extracted_description?: string | null;
   fit_evidence: Record<string, EvidenceItem[]>;
   source_evidence: Record<string, string[]>;
   hard_gate_reasons: string[];
@@ -206,6 +224,7 @@ const quickReasons: Record<Rating, string[]> = {
 function App() {
   const [auth, setAuth] = React.useState<AuthStatus | null>(null);
   const [jobs, setJobs] = React.useState<JobListItem[]>([]);
+  const [allJobs, setAllJobs] = React.useState<JobListItem[]>([]);
   const [pipelineJobs, setPipelineJobs] = React.useState<JobListItem[]>([]);
   const [selectedId, setSelectedId] = React.useState<string | null>(null);
   const [selectedJob, setSelectedJob] = React.useState<JobDetail | null>(null);
@@ -219,17 +238,21 @@ function App() {
   const [loading, setLoading] = React.useState(true);
   const [discoveryRunning, setDiscoveryRunning] = React.useState(false);
   const [discoveryMessage, setDiscoveryMessage] = React.useState<string | null>(null);
+  const [discoveryError, setDiscoveryError] = React.useState<string | null>(null);
   const [error, setError] = React.useState<string | null>(null);
   const [mobileDetailOpen, setMobileDetailOpen] = React.useState(false);
   const [feedbackMode, setFeedbackMode] = React.useState<"decline" | "revise" | null>(null);
   const [feedbackSaving, setFeedbackSaving] = React.useState(false);
-  const [actionNotice, setActionNotice] = React.useState<string | null>(null);
+  const [feedbackError, setFeedbackError] = React.useState<string | null>(null);
+  const [regenerationRunning, setRegenerationRunning] = React.useState(false);
+  const [actionNotice, setActionNotice] = React.useState<{ jobId: string; text: string } | null>(null);
   const isUnlocked = auth != null && (!auth.auth_required || auth.authenticated);
 
   const handleAuthExpired = React.useCallback((reason: unknown) => {
     if (reason instanceof AuthExpiredError) {
       setAuth({ auth_required: true, authenticated: false });
       setJobs([]);
+      setAllJobs([]);
       setPipelineJobs([]);
       setSelectedId(null);
       setSelectedJob(null);
@@ -241,6 +264,8 @@ function App() {
       setError(null);
       setFeedbackMode(null);
       setFeedbackSaving(false);
+      setFeedbackError(null);
+      setDiscoveryError(null);
       setActionNotice(null);
       return true;
     }
@@ -264,20 +289,26 @@ function App() {
   const loadJobs = React.useCallback(async () => {
     setError(null);
     const data = await api<JobListItem[]>(`/api/jobs?filter=${filter}`);
-    const visible = data.filter(isUserVisibleJob);
-    setJobs(visible);
-    setSelectedId((current) => visible.some((job) => job.id === current) ? current : visible[0]?.id ?? null);
+    setJobs(data);
+    setSelectedId((current) => current ?? data[0]?.id ?? null);
   }, [filter]);
+
+  const loadAllJobs = React.useCallback(async () => {
+    const data = await api<JobListItem[]>("/api/jobs?filter=all&limit=200");
+    setAllJobs(data);
+    setPipelineJobs(data.filter(isUserVisibleJob));
+    return data;
+  }, []);
 
   React.useEffect(() => {
     if (!isUnlocked) return;
     setLoading(true);
-    loadJobs()
+    Promise.all([loadJobs(), loadAllJobs()])
       .catch((reason: unknown) => {
         if (!handleAuthExpired(reason)) setError(messageFrom(reason));
       })
       .finally(() => setLoading(false));
-  }, [handleAuthExpired, isUnlocked, loadJobs]);
+  }, [handleAuthExpired, isUnlocked, loadAllJobs, loadJobs]);
 
   React.useEffect(() => {
     if (!isUnlocked) return;
@@ -302,7 +333,7 @@ function App() {
   React.useEffect(() => {
     if (!isUnlocked) return;
     if (view === "pipeline") {
-      api<JobListItem[]>("/api/jobs?filter=all").then((data) => setPipelineJobs(data.filter(isUserVisibleJob))).catch((reason: unknown) => {
+      loadAllJobs().catch((reason: unknown) => {
         if (!handleAuthExpired(reason)) setError(messageFrom(reason));
       });
     }
@@ -324,41 +355,115 @@ function App() {
         if (!handleAuthExpired(reason)) setError(messageFrom(reason));
       });
     }
-  }, [handleAuthExpired, isUnlocked, view]);
+  }, [handleAuthExpired, isUnlocked, loadAllJobs, view]);
 
-  const inboxCount = jobs.filter((job) => job.status === "inbox").length;
-  const strongCount = jobs.filter((job) => (job.score ?? 0) >= 70).length;
+  React.useEffect(() => {
+    if (!isUnlocked) return;
+    function refreshVisibleData() {
+      if (document.visibilityState !== "visible") return;
+      void loadJobs().catch((reason: unknown) => {
+        if (!handleAuthExpired(reason)) setError(messageFrom(reason));
+      });
+      void loadAllJobs().catch((reason: unknown) => {
+        if (!handleAuthExpired(reason)) setError(messageFrom(reason));
+      });
+      void api<DashboardPulse>("/api/dashboard/pulse?days=20").then(setPulse).catch((reason: unknown) => {
+        if (!handleAuthExpired(reason)) setError(messageFrom(reason));
+      });
+      if (view === "activity") {
+        void api<ActivityItem[]>("/api/activity").then(setActivity).catch((reason: unknown) => {
+          if (!handleAuthExpired(reason)) setError(messageFrom(reason));
+        });
+      }
+      if (view === "preferences") {
+        void api<DiscoveryOperations>("/api/discovery/operations").then(setDiscoveryOperations).catch((reason: unknown) => {
+          if (!handleAuthExpired(reason)) setError(messageFrom(reason));
+        });
+      }
+    }
+    window.addEventListener("focus", refreshVisibleData);
+    document.addEventListener("visibilitychange", refreshVisibleData);
+    return () => {
+      window.removeEventListener("focus", refreshVisibleData);
+      document.removeEventListener("visibilitychange", refreshVisibleData);
+    };
+  }, [handleAuthExpired, isUnlocked, loadAllJobs, loadJobs, view]);
+
+  const inboxCount = allJobs.filter((job) => job.status === "inbox" && job.pack_status === "ready").length;
+  const strongCount = allJobs.filter((job) => job.status === "inbox" && job.pack_status === "ready" && (job.score ?? 0) >= 70).length;
 
   async function submitFeedback(rating: Rating, reasons: string[], note: string) {
     if (!selectedJob || feedbackSaving) return;
+    const actedJobId = selectedJob.id;
     setFeedbackSaving(true);
+    setFeedbackError(null);
     try {
-      const feedback = await api<Feedback>(`/api/jobs/${selectedJob.id}/feedback`, {
+      await api<Feedback>(`/api/jobs/${actedJobId}/feedback`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ rating, reasons, note })
       });
-      setSelectedJob((current) => current ? { ...current, status: rating, feedback } : current);
+      const updated = await api<JobDetail>(`/api/jobs/${actedJobId}`);
+      setSelectedJob(updated);
       setFeedbackMode(null);
-      setActionNotice(
-        rating === "bad"
-          ? "Moved to Passed. Your decline feedback is saved."
-          : rating === "maybe"
-            ? "Moved to Review. Your requested changes are saved."
-            : "Application pack approved."
-      );
-      await loadJobs();
+      const text = rating === "bad"
+        ? "Moved to Passed. Your decline feedback is saved."
+        : rating === "maybe"
+          ? "Moved to Review. The current pack is invalidated until regenerated."
+          : "Application pack approved and saved for manual application.";
+      setActionNotice({ jobId: actedJobId, text });
+      if (rating === "maybe") {
+        setJobs((current) => current.filter((job) => job.id !== actedJobId));
+      } else {
+        await loadJobs();
+      }
+      await loadAllJobs();
       setActivity(await api<ActivityItem[]>("/api/activity"));
     } catch (reason) {
-      if (!handleAuthExpired(reason)) setError(messageFrom(reason));
+      if (!handleAuthExpired(reason)) {
+        const message = messageFrom(reason);
+        setFeedbackError(message);
+        setError(message);
+      }
     } finally {
       setFeedbackSaving(false);
+    }
+  }
+
+  async function regeneratePack() {
+    if (!selectedJob || regenerationRunning) return;
+    const actedJobId = selectedJob.id;
+    setRegenerationRunning(true);
+    setFeedbackError(null);
+    try {
+      const updated = await api<JobDetail>(`/api/jobs/${actedJobId}/regenerate-pack`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          reasons: selectedJob.feedback?.reasons ?? [],
+          note: selectedJob.feedback?.note ?? ""
+        })
+      });
+      setSelectedJob(updated);
+      setActionNotice({ jobId: actedJobId, text: `Regenerated pack v${updated.application_pack?.version ?? ""}. Returned to Inbox when ready.` });
+      await loadJobs();
+      await loadAllJobs();
+      setActivity(await api<ActivityItem[]>("/api/activity"));
+    } catch (reason) {
+      if (!handleAuthExpired(reason)) {
+        const message = messageFrom(reason);
+        setFeedbackError(message);
+        setError(message);
+      }
+    } finally {
+      setRegenerationRunning(false);
     }
   }
 
   async function runDiscovery() {
     setDiscoveryRunning(true);
     setDiscoveryMessage(null);
+    setDiscoveryError(null);
     setError(null);
     try {
       const result = await api<DiscoveryRun>("/api/discovery/run", { method: "POST" });
@@ -368,8 +473,13 @@ function App() {
       setDiscoveryOperations(await api<DiscoveryOperations>("/api/discovery/operations"));
       setActivity(await api<ActivityItem[]>("/api/activity"));
       await loadJobs();
+      await loadAllJobs();
     } catch (reason) {
-      if (!handleAuthExpired(reason)) setError(messageFrom(reason));
+      if (!handleAuthExpired(reason)) {
+        const message = messageFrom(reason);
+        setDiscoveryError(message);
+        setError(message);
+      }
     } finally {
       setDiscoveryRunning(false);
     }
@@ -440,6 +550,7 @@ function App() {
     } finally {
       setAuth({ auth_required: true, authenticated: false });
       setJobs([]);
+      setAllJobs([]);
       setPipelineJobs([]);
       setSelectedId(null);
       setSelectedJob(null);
@@ -451,6 +562,8 @@ function App() {
       setMobileDetailOpen(false);
       setFeedbackMode(null);
       setFeedbackSaving(false);
+      setFeedbackError(null);
+      setDiscoveryError(null);
       setActionNotice(null);
     }
   }
@@ -471,23 +584,26 @@ function App() {
   }
 
   const detail = feedbackMode && selectedJob ? (
-    <DeclineFeedback
-      job={selectedJob}
-      mode={feedbackMode}
-      saving={feedbackSaving}
-      onClose={() => setFeedbackMode(null)}
-      onFeedback={(reasons, note) => void submitFeedback(feedbackMode === "decline" ? "bad" : "maybe", reasons, note)}
-    />
+      <DeclineFeedback
+        job={selectedJob}
+        mode={feedbackMode}
+        saving={feedbackSaving}
+        error={feedbackError}
+        onClose={() => setFeedbackMode(null)}
+        onFeedback={(reasons, note) => void submitFeedback(feedbackMode === "decline" ? "bad" : "maybe", reasons, note)}
+      />
   ) : view === "inbox" ? (
     selectedJob ? (
       <JobReview
         job={selectedJob}
-        actionNotice={actionNotice}
-        saving={feedbackSaving}
+        actionNotice={actionNotice?.jobId === selectedJob.id ? actionNotice.text : null}
+        saving={feedbackSaving || regenerationRunning}
+        error={feedbackError}
         onBack={() => setMobileDetailOpen(false)}
         onDecline={() => setFeedbackMode("decline")}
         onRevise={() => setFeedbackMode("revise")}
         onApprove={() => void submitFeedback("good", ["Application pack approved"], "")}
+        onRegenerate={() => void regeneratePack()}
       />
     ) : (
       <EmptyDetail />
@@ -505,7 +621,14 @@ function App() {
   ) : view === "activity" ? (
     <ActivityView
       items={activity}
-      jobs={jobs}
+      jobs={allJobs}
+      onOpenJob={(id) => {
+        setSelectedId(id);
+        setActionNotice(null);
+        setView("inbox");
+        setMobileDetailOpen(true);
+        setFeedbackMode(null);
+      }}
       onOpenSettings={() => {
         navigate("preferences");
         window.setTimeout(() => document.getElementById("search-automation")?.scrollIntoView({ behavior: "smooth" }), 0);
@@ -517,6 +640,7 @@ function App() {
       operations={discoveryOperations}
       discoveryRunning={discoveryRunning}
       discoveryMessage={discoveryMessage}
+      discoveryError={discoveryError}
       reactiveResume={reactiveResume}
       onRunDiscovery={runDiscovery}
       onSaveDiscovery={saveDiscoveryConfig}
@@ -557,13 +681,14 @@ function App() {
         <section className="phone-surface inbox-pane" aria-label="Pulse Inbox">
           <InboxScreen
             jobs={jobs}
+            countJobs={allJobs}
             selectedId={selectedId}
             filter={filter}
             loading={loading}
             discoveryRunning={discoveryRunning}
             discoveryMessage={discoveryMessage}
             pulse={pulse}
-            error={error}
+            error={error || discoveryError}
             counts={{ inboxCount, strongCount }}
             onRefresh={() => void runDiscovery()}
             onFilter={setFilter}
@@ -591,6 +716,7 @@ function App() {
 
 function InboxScreen({
   jobs,
+  countJobs,
   selectedId,
   filter,
   loading,
@@ -606,6 +732,7 @@ function InboxScreen({
   onNavigate
 }: {
   jobs: JobListItem[];
+  countJobs: JobListItem[];
   selectedId: string | null;
   filter: Filter;
   loading: boolean;
@@ -655,7 +782,7 @@ function InboxScreen({
         <nav className="filter-strip" aria-label="Job filters">
           {filters.map((item) => (
             <button key={item.id} className={filter === item.id ? "active" : ""} onClick={() => onFilter(item.id)} type="button">
-              {item.label.toUpperCase()} · {filterCount(item.id, jobs, counts)}
+              {item.label.toUpperCase()} · {filterCount(item.id, countJobs, counts)}
             </button>
           ))}
         </nav>
@@ -697,7 +824,7 @@ function InboxScreen({
               <span className={`company-mark tint-${index % 4}`}>{initial(job.company)}</span>
               <span className="match-copy">
                 <strong>{job.title}</strong>
-                <small>{job.company.toUpperCase()} · {job.score ?? "--"}%{job.pack_status === "ready" ? " · PACK READY" : ""}</small>
+                <small>{job.company.toUpperCase()} · {compactLocation(job).toUpperCase()} · {shortSalary(job)} · {job.score ?? "--"}%{job.pack_status === "ready" ? " · PACK READY" : ""}</small>
               </span>
               <ArrowUpRight size={17} />
             </button>
@@ -715,18 +842,22 @@ function JobReview({
   job,
   actionNotice,
   saving,
+  error,
   onBack,
   onDecline,
   onRevise,
-  onApprove
+  onApprove,
+  onRegenerate
 }: {
   job: JobDetail;
   actionNotice: string | null;
   saving: boolean;
+  error: string | null;
   onBack: () => void;
   onDecline: () => void;
   onRevise: () => void;
   onApprove: () => void;
+  onRegenerate: () => void;
 }) {
   const pack = job.application_pack;
   const statusCopy = actionNotice || (
@@ -735,7 +866,7 @@ function JobReview({
       : job.status === "maybe"
         ? "Changes requested. Your feedback is attached in Review."
         : job.status === "good"
-          ? "Application pack approved."
+          ? "Pack approved and saved for manual application."
           : null
   );
   return (
@@ -773,6 +904,7 @@ function JobReview({
             <span>{statusCopy}</span>
           </div>
         ) : null}
+        {error ? <div className="state-card error">{error}</div> : null}
         <section className="insight-row">
           <span>01</span>
           <div>
@@ -784,20 +916,39 @@ function JobReview({
         <section className={`pack pack-${pack?.status || "missing"}`}>
           <div className="pack-header">
             <b>APPLICATION PACK</b>
-            <span>{pack?.status === "ready" ? "READY" : pack?.status === "failed" ? "NEEDS ATTENTION" : "PREPARING"}</span>
+            <span>{pack?.status === "ready" ? `READY V${pack.version}` : pack?.revision_state === "changes_requested" ? `CHANGES REQUESTED V${pack.version}` : pack?.status === "failed" ? "NEEDS ATTENTION" : "PREPARING"}</span>
           </div>
           {pack?.status === "ready" ? (
             <>
               <PackRow number="01" title="Prepared CV" meta={`${pack.resume_pdf_pages || 1}-page PDF · ${pack.resume_name || "Job-specific Base CV copy"}`} href={`/api/jobs/${job.id}/cv.pdf`} />
               <PackRow number="02" title="Application letter" meta={`PDF · ${pack.letter_subject || "German application letter"}`} href={`/api/jobs/${job.id}/application-letter.pdf`} />
+              {pack.versions?.length > 1 ? (
+                <div className="pack-version-history">
+                  <b>VERSION HISTORY</b>
+                  {pack.versions.map((item) => (
+                    <span key={item.version}>
+                      V{item.version}
+                      <a href={`/api/jobs/${job.id}/cv.pdf?version=${item.version}`} target="_blank" rel="noreferrer">CV</a>
+                      <a href={`/api/jobs/${job.id}/application-letter.pdf?version=${item.version}`} target="_blank" rel="noreferrer">LETTER</a>
+                    </span>
+                  ))}
+                </div>
+              ) : null}
             </>
           ) : (
             <p className="pack-state-copy">
               {pack?.status === "failed"
                 ? pack.error || "The package could not be prepared yet."
+                : pack?.revision_state === "changes_requested"
+                  ? pack.error || "Changes are saved. Regenerate to create a new ready pack version."
                 : "JobFlow is preparing a job-specific Base CV copy and German application letter."}
             </p>
           )}
+          {pack?.revision_state === "changes_requested" ? (
+            <button className="regenerate-action" type="button" onClick={onRegenerate} disabled={saving}>
+              <RefreshCw size={15} /> {saving ? "REGENERATING" : "REGENERATE PACK"}
+            </button>
+          ) : null}
         </section>
 
         <div className="spec-strip">
@@ -807,10 +958,11 @@ function JobReview({
         </div>
 
         <EvidenceSection title="Fit evidence" evidence={job.fit_evidence} />
-        <ListSection title="Missing information" icon={<ListFilter size={15} />} items={job.missing_info} empty="No obvious missing fields." />
+        <ListSection title="Missing information" icon={<ListFilter size={15} />} items={job.missing_info} empty="Source extraction is complete enough for review." />
         <ListSection title="Hard gate concerns" icon={<Circle size={15} />} items={job.hard_gate_reasons} empty="No hard gate concern preserved." />
         <ListSection title="Responsibilities" icon={<BriefcaseBusiness size={15} />} items={job.responsibilities} empty="No responsibilities extracted." />
         <ListSection title="Requirements" icon={<ClipboardCheck size={15} />} items={job.requirements} empty="No requirements extracted." />
+        <SourceDescription job={job} />
       </div>
 
       <footer className="review-actions">
@@ -832,12 +984,14 @@ function DeclineFeedback({
   job,
   mode,
   saving,
+  error,
   onClose,
   onFeedback
 }: {
   job: JobDetail;
   mode: "decline" | "revise";
   saving: boolean;
+  error: string | null;
   onClose: () => void;
   onFeedback: (reasons: string[], note: string) => void;
 }) {
@@ -859,13 +1013,13 @@ function DeclineFeedback({
           <button className="icon-button black" type="button" onClick={onClose} aria-label="Close feedback">
             <X size={18} />
           </button>
-          <span className="micro">TEACH THE AGENT</span>
+          <span className="micro">REVIEW CONTEXT</span>
         </div>
-        <h1>{mode === "decline" ? <>Pass on this.<br />Improve the next.</> : <>What should<br />change?</>}</h1>
+        <h1>{mode === "decline" ? <>Pass on this.<br />Save the reason.</> : <>What should<br />change?</>}</h1>
         <p className="decline-lead">
           {mode === "decline"
-            ? "Every no becomes a sharper filter for tomorrow's search."
-            : "Add the reason first. The job will move to Review with this feedback attached."}
+            ? "This exact role will move to Passed with your reason saved."
+            : "The job will move to Review and the current pack will be invalidated until you regenerate it."}
         </p>
 
         <div className="decline-ticket">
@@ -900,9 +1054,11 @@ function DeclineFeedback({
           />
         </label>
 
+        {error ? <div className="state-card error">{error}</div> : null}
+
         <div className="learning-line">
           <BrainCircuit size={18} />
-          <span>These signals will re-rank future matches.</span>
+          <span>Saved here as review context; regeneration uses these notes deterministically for this job.</span>
         </div>
       </div>
       <footer className="decline-submit">
@@ -996,6 +1152,7 @@ function PreferencesView({
   operations,
   discoveryRunning,
   discoveryMessage,
+  discoveryError,
   reactiveResume,
   onRunDiscovery,
   onSaveDiscovery,
@@ -1009,6 +1166,7 @@ function PreferencesView({
   operations: DiscoveryOperations | null;
   discoveryRunning: boolean;
   discoveryMessage: string | null;
+  discoveryError: string | null;
   reactiveResume: ReactiveResumeStatus | null;
   onRunDiscovery: () => Promise<void>;
   onSaveDiscovery: (schedule: DiscoveryOperations["schedule"], sourcesEnabled: Record<string, boolean>) => Promise<DiscoveryOperations>;
@@ -1038,16 +1196,8 @@ function PreferencesView({
     setDraft({ ...draft, work_modes: nextModes });
   }
 
-  function toggleRule(rule: string) {
-    const nextRules = draft.hard_rules.includes(rule)
-      ? draft.hard_rules.filter((item) => item !== rule)
-      : [...draft.hard_rules, rule];
-    setDraft({ ...draft, hard_rules: nextRules });
-  }
-
   const salaryMin = boundedNumber(String(draft.salary_target_min ?? 50000), 30000, 120000, 50000);
   const salaryMax = boundedNumber(String(draft.salary_target_max ?? 56000), 30000, 120000, 56000);
-  const visibleRules = preferredRules(draft);
   const isDirty = preferenceFingerprint(draft) !== preferenceFingerprint(baseline);
 
   async function save() {
@@ -1070,16 +1220,16 @@ function PreferencesView({
         <div className="hero-top">
           <div>
             <p className="micro orange-text">SEARCH DNA</p>
-            <h1>Train your agent</h1>
+            <h1>Search profile</h1>
           </div>
           <span className="round-action">
             <BrainCircuit size={20} />
           </span>
         </div>
-        <p>Hard rules filter. Soft preferences re-rank. Your feedback keeps both evolving.</p>
-        <div className="quality-row">
-          <span><i style={{ width: `${Math.min(100, 62 + draft.hard_rules.length * 6)}%` }} /></span>
-          <b>{Math.min(98, 62 + draft.hard_rules.length * 6)}% SHARP</b>
+        <p>Saved salary, location, commute, language, and seniority gates control which packs can reach Inbox.</p>
+        <div className="quality-row factual">
+          <span><i style={{ width: `${Math.min(100, Math.max(18, draft.role_families.length * 12))}%` }} /></span>
+          <b>{draft.role_families.length} ROLE TAGS</b>
         </div>
       </header>
 
@@ -1104,7 +1254,10 @@ function PreferencesView({
               max={120000}
               step={1000}
               value={salaryMin}
-              onChange={(event) => setDraft({ ...draft, salary_target_min: Math.min(Number(event.target.value), salaryMax) })}
+              onChange={(event) => {
+                const nextMin = Math.min(Number(event.target.value), salaryMax);
+                setDraft({ ...draft, salary_target_min: nextMin, acceptable_salary_min: nextMin });
+              }}
             />
             <input
               className="salary-range salary-range-max"
@@ -1125,7 +1278,10 @@ function PreferencesView({
               max={salaryMax}
               step={1000}
               value={salaryMin}
-              onChange={(event) => setDraft({ ...draft, salary_target_min: Math.min(boundedNumber(event.target.value, 30000, 120000, salaryMin), salaryMax) })}
+              onChange={(event) => {
+                const nextMin = Math.min(boundedNumber(event.target.value, 30000, 120000, salaryMin), salaryMax);
+                setDraft({ ...draft, salary_target_min: nextMin, acceptable_salary_min: nextMin });
+              }}
             />
             <input
               aria-label="Target maximum salary"
@@ -1137,7 +1293,7 @@ function PreferencesView({
               onChange={(event) => setDraft({ ...draft, salary_target_max: Math.max(boundedNumber(event.target.value, 30000, 120000, salaryMax), salaryMin) })}
             />
           </div>
-          <p className="salary-note">Exceptional transition roles can still be considered from €47.5k.</p>
+          <p className="salary-note">The target minimum is also the hard salary gate used before pack preparation.</p>
         </section>
 
         <section className="pref-section">
@@ -1164,14 +1320,20 @@ function PreferencesView({
 
         <section className="pref-section rules-section">
           <h2>Hard rules</h2>
-          {visibleRules.map((rule) => (
-            <button className="rule-row" type="button" key={rule} onClick={() => toggleRule(rule)}>
+          {[
+            ["Location", draft.target_locations.length ? draft.target_locations.join(", ") : "Wien default"],
+            ["Salary", `${formatCurrencyValue(salaryMin, draft.salary_currency)} minimum`],
+            ["Work setup", draft.work_modes.length ? draft.work_modes.join(", ") : "No commute gate saved"],
+            ["Home office", draft.min_home_office_days == null ? "No minimum saved" : `${draft.min_home_office_days}+ days`],
+            ["Seniority", "Senior, lead, manager, principal roles are blocked"]
+          ].map(([label, value]) => (
+            <div className="rule-row readonly" key={label}>
               <span>
-                <b>{humanizeRule(rule)}</b>
-                <small>{ruleMeta(rule)}</small>
+                <b>{label}</b>
+                <small>{value}</small>
               </span>
-              <i className={draft.hard_rules.includes(rule) ? "on" : ""}><b /></i>
-            </button>
+              <i className="on"><b /></i>
+            </div>
           ))}
         </section>
 
@@ -1242,14 +1404,18 @@ function PreferencesView({
             operations={operations}
             running={discoveryRunning}
             message={discoveryMessage}
-            onRun={onRunDiscovery}
+            error={discoveryError}
+            onRun={async () => {
+              if (isDirty) await save();
+              await onRunDiscovery();
+            }}
             onSave={onSaveDiscovery}
           />
           <div className="approval-boundary">
             <span className="company-mark dark"><LockKeyhole size={14} /></span>
             <span>
               <b>Applying requires your approval</b>
-              <small>JobFlow may prepare CVs and letters, but it never submits or contacts an employer without your approval.</small>
+              <small>Approval saves the pack as good for your manual application. JobFlow does not submit or contact employers.</small>
             </span>
           </div>
         </section>
@@ -1264,7 +1430,7 @@ function PreferencesView({
 
         <div className="learning-note">
           <span className="company-mark dark"><BrainCircuit size={14} /></span>
-          <b>Last learned from local feedback</b>
+          <b>Feedback is stored per job and used when regenerating that job's pack.</b>
         </div>
       </div>
 
@@ -1432,12 +1598,14 @@ function DiscoveryOperationsPanel({
   operations,
   running,
   message,
+  error,
   onRun,
   onSave
 }: {
   operations: DiscoveryOperations | null;
   running: boolean;
   message: string | null;
+  error: string | null;
   onRun: () => Promise<void>;
   onSave: (schedule: DiscoveryOperations["schedule"], sourcesEnabled: Record<string, boolean>) => Promise<DiscoveryOperations>;
 }) {
@@ -1486,10 +1654,12 @@ function DiscoveryOperationsPanel({
         </div>
       </div>
 
-      <button className="search-now" type="button" disabled={running} onClick={() => void onRun()}>
+      <button className="search-now" type="button" disabled={running || dirty} onClick={() => void onRun()}>
         <ScanSearch size={16} /> {running ? "SEARCHING…" : "SEARCH NOW"}
       </button>
       {message ? <p className="operation-message">{message}</p> : null}
+      {error ? <p className="operation-message error">{error}</p> : null}
+      {dirty ? <p className="operation-message">Save schedule and source changes before Search Now.</p> : null}
 
       <div className="operation-block">
         <div className="operation-heading">
@@ -1502,7 +1672,7 @@ function DiscoveryOperationsPanel({
           ><i /></button>
         </div>
         <p className="schedule-explainer">
-          Every selected time runs the same complete flow: crawl sources → remove duplicates → evaluate fit → add visible jobs → prepare CV + letter. The repetition only catches newly posted roles during the day.
+          Every selected time runs discovery, then only jobs with complete extraction and ready packs can appear in Inbox.
         </p>
         <div className="schedule-times">
           {schedule.times.map((time, index) => (
@@ -1538,7 +1708,7 @@ function DiscoveryOperationsPanel({
       </div>
 
       <div className="operation-block query-preview">
-        <div className="operation-heading"><div><b>Search plan</b><small>Exact phrases used by Search now and scheduled scans, generated from your saved roles and locations.</small></div><em>{operations.generated_queries.length}</em></div>
+        <div className="operation-heading"><div><b>Search plan</b><small>Exact phrases used by Search Now and scheduled scans, generated from saved roles and locations.</small></div><em>{operations.generated_queries.length}</em></div>
         {operations.generated_queries.slice(0, 4).map((query) => <span key={query}>{query}</span>)}
         {operations.generated_queries.length > 4 ? <small>+{operations.generated_queries.length - 4} more searches</small> : null}
       </div>
@@ -1551,7 +1721,7 @@ function DiscoveryOperationsPanel({
       ) : null}
 
       <div className="operation-block run-history">
-        <div className="operation-heading"><div><b>Execution history</b><small>Every row is one complete pipeline execution—scheduled or Search now.</small></div></div>
+        <div className="operation-heading"><div><b>Execution history</b><small>Recent discovery runs with pack counts and failure details.</small></div></div>
         {operations.recent_runs.slice(0, 5).map((run) => (
           <div className="run-row" key={run.id}>
             <span className={`run-state ${run.status}`} />
@@ -1569,9 +1739,11 @@ function DiscoveryOperationsPanel({
 
 function PipelineView({ jobs, onSelect }: { jobs: JobListItem[]; onSelect: (id: string) => void }) {
   const stages = [
-    { label: "Ready", note: "Strong decisions", jobs: jobs.filter((job) => job.status === "good") },
-    { label: "Review", note: "Needs your call", jobs: jobs.filter((job) => job.status === "inbox" || job.status === "maybe") },
-    { label: "Passed", note: "Agent learned", jobs: jobs.filter((job) => job.status === "bad") }
+    { label: "Inbox", note: "Ready and unreviewed", jobs: jobs.filter((job) => job.status === "inbox" && job.pack_status === "ready") },
+    { label: "Needs attention", note: "Pack failed", jobs: jobs.filter((job) => job.status === "inbox" && job.pack_status === "failed") },
+    { label: "Review", note: "Changes requested", jobs: jobs.filter((job) => job.status === "maybe") },
+    { label: "Saved", note: "Approved packs", jobs: jobs.filter((job) => job.status === "good") },
+    { label: "Passed", note: "Declined roles", jobs: jobs.filter((job) => job.status === "bad") }
   ];
 
   return (
@@ -1579,7 +1751,7 @@ function PipelineView({ jobs, onSelect }: { jobs: JobListItem[]; onSelect: (id: 
       <header className="pipeline-hero">
         <p className="micro">APPLICATION FLOW</p>
         <h1>Momentum</h1>
-        <p>Every role has one clear next state.</p>
+        <p>Every role has one persisted review state.</p>
         <div className="pipeline-stats">
           {stages.map((stage, index) => (
             <div className={index === 0 ? "pipeline-stat dark" : "pipeline-stat"} key={stage.label}>
@@ -1617,10 +1789,20 @@ function PipelineView({ jobs, onSelect }: { jobs: JobListItem[]; onSelect: (id: 
   );
 }
 
-function ActivityView({ items, jobs, onOpenSettings }: { items: ActivityItem[]; jobs: JobListItem[]; onOpenSettings: () => void }) {
-  const packCount = jobs.filter((job) => job.status !== "bad").length;
+function ActivityView({
+  items,
+  jobs,
+  onOpenJob,
+  onOpenSettings
+}: {
+  items: ActivityItem[];
+  jobs: JobListItem[];
+  onOpenJob: (id: string) => void;
+  onOpenSettings: () => void;
+}) {
+  const packCount = jobs.filter((job) => job.pack_status === "ready").length;
   const likedCount = jobs.filter((job) => job.status === "good").length;
-  const groups = groupActivitiesByDay(items);
+  const groups = groupActivitiesByDay(collapseSystemActivities(items));
   return (
     <article className="activity-screen">
       <header className="activity-hero">
@@ -1648,8 +1830,9 @@ function ActivityView({ items, jobs, onOpenSettings }: { items: ActivityItem[]; 
               <span>{new Intl.DateTimeFormat(undefined, { weekday: "short", day: "2-digit", month: "short" }).format(group.date).toUpperCase()}</span>
             </div>
             <div className="activity-list">
-              {group.items.map((item) => (
-                <div className="activity-item" key={item.id}>
+              {group.items.map((item) => {
+                const content = (
+                  <>
                   <span className="activity-icon"><ActivityIcon kind={item.kind} /></span>
                   <div>
                     <div className="activity-item-top">
@@ -1658,9 +1841,17 @@ function ActivityView({ items, jobs, onOpenSettings }: { items: ActivityItem[]; 
                     </div>
                     <p>{item.body}</p>
                   </div>
-                  <ArrowUpRight size={14} />
-                </div>
-              ))}
+                  {item.job_id ? <ArrowUpRight size={14} /> : null}
+                  </>
+                );
+                return item.job_id ? (
+                  <button className="activity-item" type="button" key={item.id} onClick={() => onOpenJob(item.job_id as string)}>
+                    {content}
+                  </button>
+                ) : (
+                  <div className="activity-item" key={item.id}>{content}</div>
+                );
+              })}
             </div>
           </React.Fragment>
         ))}
@@ -1711,6 +1902,16 @@ function ListSection({ title, icon, items, empty }: { title: string; icon: React
       ) : (
         <p className="muted">{empty}</p>
       )}
+    </section>
+  );
+}
+
+function SourceDescription({ job }: { job: JobDetail }) {
+  const description = (job.extracted_description || job.raw_description || "").trim();
+  return (
+    <section className="content-section source-description">
+      <h2><FileText size={15} />Source description</h2>
+      {description ? <p>{description}</p> : <p className="muted">No source description was extracted.</p>}
     </section>
   );
 }
@@ -1978,6 +2179,25 @@ function groupActivitiesByDay(items: ActivityItem[]) {
   return [...groups.values()];
 }
 
+function collapseSystemActivities(items: ActivityItem[]) {
+  const collapsed: ActivityItem[] = [];
+  for (const item of items) {
+    const previous = collapsed.at(-1);
+    if (
+      previous
+      && !item.job_id
+      && !previous.job_id
+      && item.kind === previous.kind
+      && item.title === previous.title
+    ) {
+      collapsed[collapsed.length - 1] = { ...previous, body: `${previous.body} · ${item.body}` };
+    } else {
+      collapsed.push(item);
+    }
+  }
+  return collapsed;
+}
+
 function formatDateTime(value: string) {
   return new Intl.DateTimeFormat(undefined, { month: "short", day: "2-digit", hour: "2-digit", minute: "2-digit" }).format(new Date(value)).toUpperCase();
 }
@@ -2014,8 +2234,8 @@ function filterCount(filter: Filter, jobs: JobListItem[], counts: { inboxCount: 
   if (filter === "inbox") return counts.inboxCount;
   if (filter === "strong") return counts.strongCount;
   if (filter === "maybe") return jobs.filter((job) => job.status === "maybe").length;
-  if (filter === "low") return jobs.filter((job) => (job.score ?? 100) < 50 || job.status === "bad").length;
-  if (filter === "reviewed") return jobs.filter((job) => job.status !== "inbox").length;
+  if (filter === "low") return jobs.filter((job) => job.status === "bad").length;
+  if (filter === "reviewed") return jobs.filter((job) => job.status === "good").length;
   return jobs.length;
 }
 
@@ -2059,8 +2279,11 @@ function humanizeRole(value: string) {
 }
 
 function normalizeEditablePreferences(preferences: Preferences): Preferences {
+  const targetMin = preferences.salary_target_min ?? preferences.acceptable_salary_min ?? null;
   return {
     ...preferences,
+    salary_target_min: targetMin,
+    acceptable_salary_min: targetMin,
     role_families: Array.from(new Set(preferences.role_families.map(humanizeRole).filter(Boolean))),
     priority_role_families: Array.from(new Set((preferences.priority_role_families ?? []).map(humanizeRole).filter(Boolean))),
     hard_rules: preferences.hard_rules.filter((rule) => !isInternalPolicyRule(rule)),

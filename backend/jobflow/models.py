@@ -16,8 +16,25 @@ class FeedbackOut(BaseModel):
     updated_at: str
 
 
+class ApplicationPackVersionOut(BaseModel):
+    version: int
+    revision_state: Literal["current", "changes_requested", "regenerated"] = "current"
+    revision_reasons: list[str] = Field(default_factory=list)
+    revision_note: str = ""
+    resume_id: str | None = None
+    resume_name: str | None = None
+    resume_pdf_pages: int | None = None
+    letter_subject: str | None = None
+    letter_body: str | None = None
+    created_at: str
+
+
 class ApplicationPackOut(BaseModel):
     status: Literal["preparing", "ready", "failed"]
+    version: int = 1
+    revision_state: Literal["current", "changes_requested", "regenerated"] = "current"
+    revision_reasons: list[str] = Field(default_factory=list)
+    revision_note: str = ""
     resume_id: str | None = None
     resume_name: str | None = None
     resume_pdf_pages: int | None = None
@@ -25,6 +42,7 @@ class ApplicationPackOut(BaseModel):
     letter_body: str | None = None
     error: str | None = None
     updated_at: str
+    versions: list[ApplicationPackVersionOut] = Field(default_factory=list)
 
 
 class JobListItem(BaseModel):
@@ -43,6 +61,7 @@ class JobListItem(BaseModel):
     source_url: str
     feedback: FeedbackOut | None = None
     pack_status: Literal["preparing", "ready", "failed"] | None = None
+    pack_revision_state: Literal["current", "changes_requested", "regenerated"] | None = None
 
 
 class EvidenceItem(BaseModel):
@@ -75,6 +94,11 @@ class JobDetail(JobListItem):
 
 class FeedbackIn(BaseModel):
     rating: Rating
+    reasons: list[str] = Field(default_factory=list, max_length=8)
+    note: str = Field(default="", max_length=1200)
+
+
+class RegeneratePackIn(BaseModel):
     reasons: list[str] = Field(default_factory=list, max_length=8)
     note: str = Field(default="", max_length=1200)
 

@@ -8,6 +8,7 @@ import urllib.parse
 import urllib.request
 import uuid
 from dataclasses import dataclass, field
+from html.parser import HTMLParser
 from typing import Any
 
 DEFAULT_CAMOFOX_API_URL = "http://127.0.0.1:9377"
@@ -48,6 +49,7 @@ class KarriereJobDetail:
     requirements: list[str]
     responsibilities: list[str]
     technologies: list[str]
+    home_office_days: int | None = None
     matched_queries: list[str] = field(default_factory=list)
 
 
@@ -191,6 +193,12 @@ def crawl_karriere(
                     # the result-page snapshot and the detail navigation. Skip that one
                     # candidate; never abort the rest of a multi-job run.
                     continue
+                try:
+                    _enrich_detail_from_job_posting(detail, _fetch_job_posting(listing.url))
+                except CamofoxProviderError:
+                    # The browser snapshot remains a bounded fallback. A temporary
+                    # structured-data fetch failure must not abort the full run.
+                    pass
                 _enrich_detail_from_listing(detail, listing)
                 detail.matched_queries = list(listing.matched_queries)
                 details.append(detail)
@@ -247,9 +255,10 @@ def parse_detail_snapshot(snapshot: str, requested_url: str) -> KarriereJobDetai
     lines = snapshot.splitlines()
     title = _first_heading(lines, level=1)
     company = _employer_name(lines) or _header_company(lines, title)
-    location = _term_value(lines, "Dienstorte")
+    location = _term_value(lines, "Dienstorte") or _term_value(lines, "Dienstort") or _term_value(lines, "Arbeitsort")
     salary_display = _term_value(lines, "Gehalt")
     work_mode = _term_value(lines, "Arbeitsmodell")
+    home_office_days = _home_office_days(work_mode)
     requirements = _section_items(lines, ("qualifikation", "anforderung", "dein profil", "das bringst du"))
     responsibilities = _section_items(lines, ("rolle und aufgaben", "deine aufgaben", "tätigkeiten", "aufgabengebiet"))
     has_embedded_detail = any(_line_text(line).casefold() == "über den job" for line in lines)
@@ -280,6 +289,7 @@ def parse_detail_snapshot(snapshot: str, requested_url: str) -> KarriereJobDetai
         requirements=requirements,
         responsibilities=responsibilities,
         technologies=technologies,
+        home_office_days=home_office_days,
     )
 
 
@@ -330,7 +340,7 @@ def _enrich_detail_from_listing(detail: KarriereJobDetail, listing: KarriereList
     card = listing.snippet
     folded = card.casefold()
     if not detail.location:
-        if "wien" in folded or any("wien" in query.casefold() for query in listing.matched_queries):
+        if re.search(r"\b(?:dienstort|dienstorte|arbeitsort)\b[^.:\n]*\bwien\b", folded):
             detail.location = "Wien"
     if not detail.salary_display and "€" in card:
         detail.salary_display = card
@@ -338,11 +348,180 @@ def _enrich_detail_from_listing(detail: KarriereJobDetail, listing: KarriereList
     if not detail.work_mode:
         if "homeoffice" in folded or "hybrid" in folded:
             detail.work_mode = "Hybrid"
+            detail.home_office_days = _home_office_days(detail.work_mode)
         else:
             detail.work_mode = "On-site"
+            detail.home_office_days = 0
     if len(detail.description.splitlines()) <= 2 and card:
         detail.description = "\n".join(part for part in (detail.title, detail.company, card) if part)[:30_000]
         detail.technologies = _technology_hits(detail.description)
+
+
+class _PostingDescriptionParser(HTMLParser):
+    def __init__(self) -> None:
+        super().__init__(convert_charrefs=True)
+        self.events: list[tuple[str, str]] = []
+        self._capture_tag: str | None = None
+        self._parts: list[str] = []
+
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        normalized = tag.casefold()
+        if self._capture_tag is None and (normalized in {"p", "li"} or re.fullmatch(r"h[1-6]", normalized)):
+            self._capture_tag = normalized
+            self._parts = []
+
+    def handle_data(self, data: str) -> None:
+        if self._capture_tag is not None:
+            self._parts.append(data)
+
+    def handle_endtag(self, tag: str) -> None:
+        if self._capture_tag != tag.casefold():
+            return
+        capture_tag = self._capture_tag
+        if capture_tag is None:
+            return
+        text = " ".join("".join(self._parts).split())
+        if text:
+            self.events.append((capture_tag, text))
+        self._capture_tag = None
+        self._parts = []
+
+
+def _fetch_job_posting(url: str) -> dict[str, Any]:
+    request = urllib.request.Request(
+        _canonical_job_url(url),
+        headers={"Accept": "text/html,application/xhtml+xml", "User-Agent": "JobFlow/1.0"},
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=25) as response:
+            raw = response.read(2_000_001)
+    except (urllib.error.HTTPError, urllib.error.URLError, TimeoutError) as exc:
+        raise CamofoxProviderError("Karriere.at structured job fetch failed") from exc
+    if len(raw) > 2_000_000:
+        raise CamofoxProviderError("Karriere.at job page was too large")
+    return _parse_job_posting_html(raw.decode("utf-8", "replace"))
+
+
+def _parse_job_posting_html(page_html: str) -> dict[str, Any]:
+    scripts = re.findall(
+        r'<script[^>]+type=["\']application/ld\+json["\'][^>]*>(.*?)</script>',
+        page_html,
+        flags=re.IGNORECASE | re.DOTALL,
+    )
+    for script in scripts:
+        try:
+            payload = json.loads(script)
+        except json.JSONDecodeError:
+            continue
+        queue: list[Any] = list(payload) if isinstance(payload, list) else [payload]
+        while queue:
+            item = queue.pop(0)
+            if not isinstance(item, dict):
+                continue
+            item_type = item.get("@type")
+            types = item_type if isinstance(item_type, list) else [item_type]
+            if "JobPosting" in types:
+                return item
+            graph = item.get("@graph")
+            if isinstance(graph, list):
+                queue.extend(graph)
+    raise CamofoxProviderError("Karriere.at page did not contain JobPosting structured data")
+
+
+def _enrich_detail_from_job_posting(detail: KarriereJobDetail, posting: dict[str, Any]) -> None:
+    title = posting.get("title")
+    if isinstance(title, str) and title.strip():
+        detail.title = " ".join(title.split())
+    organization = posting.get("hiringOrganization")
+    if isinstance(organization, dict) and isinstance(organization.get("name"), str):
+        detail.company = " ".join(str(organization["name"]).split())
+
+    locality = _structured_location(posting.get("jobLocation"))
+    if locality:
+        detail.location = locality
+
+    description_html = posting.get("description")
+    if isinstance(description_html, str) and description_html.strip():
+        parser = _PostingDescriptionParser()
+        parser.feed(description_html)
+        parser.close()
+        plain_parts: list[str] = []
+        requirements: list[str] = []
+        responsibilities: list[str] = []
+        section: str | None = None
+        for tag, text in parser.events:
+            if text not in plain_parts:
+                plain_parts.append(text)
+            if tag.startswith("h"):
+                folded = text.casefold()
+                if any(term in folded for term in ("anforder", "dein profil", "qualifikation", "das bringst du", "du bietest")):
+                    section = "requirements"
+                elif any(term in folded for term in ("aufgaben", "deine rolle", "deine zukünftige rolle", "tätigkeiten", "aufgabengebiet")):
+                    section = "responsibilities"
+                else:
+                    section = None
+            elif tag == "li" and section == "requirements" and text not in requirements:
+                requirements.append(text)
+            elif tag == "li" and section == "responsibilities" and text not in responsibilities:
+                responsibilities.append(text)
+        if plain_parts:
+            detail.description = "\n".join(plain_parts)[:30_000]
+        if requirements:
+            detail.requirements = requirements
+        if responsibilities:
+            detail.responsibilities = responsibilities
+
+    salary_display, salary_min, salary_max = _structured_salary(posting.get("baseSalary"))
+    if salary_display:
+        detail.salary_display = salary_display
+        detail.salary_min_annual = salary_min
+        detail.salary_max_annual = salary_max
+    detail.technologies = _technology_hits(
+        " ".join([detail.title, detail.description, *detail.requirements, *detail.responsibilities])
+    )
+    parsed_home_office_days = _home_office_days(detail.description)
+    if parsed_home_office_days is not None:
+        detail.home_office_days = parsed_home_office_days
+
+
+def _structured_location(value: Any) -> str | None:
+    places = value if isinstance(value, list) else [value]
+    for place in places:
+        if not isinstance(place, dict):
+            continue
+        address = place.get("address")
+        if isinstance(address, dict):
+            locality = address.get("addressLocality")
+            if isinstance(locality, str) and locality.strip():
+                return " ".join(locality.split())
+    return None
+
+
+def _structured_salary(value: Any) -> tuple[str | None, int | None, int | None]:
+    if not isinstance(value, dict):
+        return None, None, None
+    amount = value.get("value")
+    if not isinstance(amount, dict):
+        return None, None, None
+    unit = str(amount.get("unitText") or "").upper()
+    raw_min = amount.get("minValue", amount.get("value"))
+    raw_max = amount.get("maxValue", amount.get("value"))
+    if not isinstance(raw_min, (int, float)) or not isinstance(raw_max, (int, float)):
+        return None, None, None
+    multiplier = 14 if unit == "MONTH" else 1 if unit == "YEAR" else 0
+    if not multiplier:
+        return None, None, None
+    annual_min = round(float(raw_min) * multiplier)
+    annual_max = round(float(raw_max) * multiplier)
+    currency = str(value.get("currency") or "EUR")
+    if unit == "MONTH":
+        monthly = f"{float(raw_min):,.2f}" if raw_min != raw_max else f"{float(raw_min):,.2f}"
+        if raw_min != raw_max:
+            monthly = f"{float(raw_min):,.2f}–{float(raw_max):,.2f}"
+        display = f"{currency} {monthly} gross/month · {annual_min:,}–{annual_max:,} gross/year" if annual_min != annual_max else f"{currency} {monthly} gross/month · {annual_min:,} gross/year"
+    else:
+        display = f"{currency} {annual_min:,}–{annual_max:,} gross/year" if annual_min != annual_max else f"{currency} {annual_min:,} gross/year"
+    return display, annual_min, annual_max
 
 
 def _term_value(lines: list[str], label: str) -> str | None:
@@ -411,6 +590,22 @@ def _annual_salary(display: str | None) -> tuple[int | None, int | None]:
     multiplier = 14 if "monat" in display.casefold() else 1
     annual = [value * multiplier for value in values]
     return min(annual), max(annual)
+
+
+def _home_office_days(display: str | None) -> int | None:
+    if not display:
+        return None
+    folded = display.casefold()
+    match = re.search(r"(\d+)\s*(?:tage|days).{0,20}(?:home|remote)", folded)
+    if match:
+        return int(match.group(1))
+    if "remote" in folded or "homeoffice" in folded:
+        return 5 if "voll" in folded or "full" in folded else None
+    if "hybrid" in folded:
+        return None
+    if "vor ort" in folded or "on-site" in folded or "onsite" in folded:
+        return 0
+    return None
 
 
 def _technology_hits(text: str) -> list[str]:

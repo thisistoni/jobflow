@@ -46,6 +46,7 @@ from .letter_pdf import render_application_letter_pdf
 from .models import (
     ActivityItem,
     ApplicationPackOut,
+    ApplicationPackVersionOut,
     DailyPulseItem,
     DashboardPulseOut,
     DiscoveryConfigIn,
@@ -67,6 +68,7 @@ from .models import (
     JobIngestIn,
     JobListItem,
     Preferences,
+    RegeneratePackIn,
     ReactiveResumeConnectIn,
     ReactiveResumeOption,
     ReactiveResumeReference,
@@ -202,16 +204,17 @@ def list_jobs(
 ) -> list[JobListItem]:
     clauses: list[str] = []
     params: list[Any] = []
+    ready_clause = _ready_pack_sql()
     if filter == "inbox":
-        clauses.append("j.status = 'inbox'")
+        clauses.append(ready_clause)
     elif filter == "strong":
-        clauses.append("j.status = 'inbox' AND (j.verdict = 'strong' OR j.score >= 70)")
+        clauses.append(f"{ready_clause} AND (j.verdict = 'strong' OR j.score >= 70)")
     elif filter == "maybe":
-        clauses.append("j.status = 'inbox' AND (j.verdict = 'maybe' OR (j.score BETWEEN 55 AND 69))")
+        clauses.append("j.status = 'maybe'")
     elif filter == "low":
-        clauses.append("j.status = 'inbox' AND (j.verdict = 'reject' OR j.score < 55)")
+        clauses.append("j.status = 'bad'")
     elif filter == "reviewed":
-        clauses.append("j.status != 'inbox'")
+        clauses.append("j.status = 'good'")
     elif filter == "unanalyzed":
         clauses.append("j.status = 'inbox' AND j.score IS NULL")
     where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
@@ -330,13 +333,19 @@ def get_job(job_id: str) -> JobDetail:
 
 
 @app.get("/api/jobs/{job_id}/cv.pdf")
-def get_job_cv(job_id: str) -> Response:
+def get_job_cv(job_id: str, version: int | None = Query(default=None, ge=1)) -> Response:
     pack = _application_pack(job_id)
     if pack is None or pack.status != "ready" or not pack.resume_id:
         raise HTTPException(status_code=404, detail="Prepared CV is not ready")
+    selected = _application_pack_version(job_id, version) if version is not None else None
+    resume_id = selected.resume_id if selected is not None else pack.resume_id
+    if version is not None and (selected is None or not resume_id):
+        raise HTTPException(status_code=404, detail="Prepared CV version was not found")
+    if not resume_id:
+        raise HTTPException(status_code=404, detail="Prepared CV is not ready")
     try:
         _, client = _configured_reactive_resume_client()
-        pdf = client.export_pdf(pack.resume_id)
+        pdf = client.export_pdf(resume_id)
     except (ReactiveResumeError, SecretStoreError, ValueError) as exc:
         raise HTTPException(status_code=502, detail=str(exc)) from exc
     return Response(
@@ -347,19 +356,25 @@ def get_job_cv(job_id: str) -> Response:
 
 
 @app.get("/api/jobs/{job_id}/application-letter.pdf")
-def get_job_application_letter(job_id: str) -> Response:
+def get_job_application_letter(job_id: str, version: int | None = Query(default=None, ge=1)) -> Response:
     pack = _application_pack(job_id)
     if pack is None or pack.status != "ready" or not pack.letter_body:
         raise HTTPException(status_code=404, detail="Application letter is not ready")
+    selected = _application_pack_version(job_id, version) if version is not None else None
+    if version is not None and selected is None:
+        raise HTTPException(status_code=404, detail="Application letter version was not found")
     with connect() as db:
         job = db.execute("SELECT title, company FROM jobs WHERE id = ?", (job_id,)).fetchone()
     if job is None:
         raise HTTPException(status_code=404, detail="Job not found")
-    subject = pack.letter_subject or f"Bewerbung als {job['title']}"
+    subject = (selected.letter_subject if selected is not None else pack.letter_subject) or f"Bewerbung als {job['title']}"
+    body = selected.letter_body if selected is not None else pack.letter_body
+    if not body:
+        raise HTTPException(status_code=404, detail="Application letter version was not found")
     pdf = render_application_letter_pdf(
         company=job["company"],
         subject=subject,
-        body=pack.letter_body,
+        body=body,
     )
     return Response(
         content=pdf,
@@ -484,6 +499,33 @@ def submit_feedback(job_id: str, payload: FeedbackIn) -> FeedbackOut:
             "UPDATE jobs SET status = ?, reviewed_at = ?, updated_at = ? WHERE id = ?",
             (payload.rating, now, now, job_id),
         )
+        if payload.rating == "maybe":
+            db.execute(
+                """
+                INSERT OR IGNORE INTO application_pack_versions(
+                    job_id, version, revision_state, revision_reasons_json, revision_note,
+                    resume_id, resume_name, resume_pdf_pages, letter_subject, letter_body, created_at
+                )
+                SELECT job_id, version, revision_state, revision_reasons_json, revision_note,
+                       resume_id, resume_name, resume_pdf_pages, letter_subject, letter_body, updated_at
+                FROM application_packs
+                WHERE job_id = ? AND status = 'ready'
+                """,
+                (job_id,),
+            )
+            db.execute(
+                """
+                UPDATE application_packs
+                SET status = 'preparing',
+                    revision_state = 'changes_requested',
+                    revision_reasons_json = ?,
+                    revision_note = ?,
+                    error = 'Changes requested; regenerate the pack to create a new ready version.',
+                    updated_at = ?
+                WHERE job_id = ?
+                """,
+                (encode_json(payload.reasons), payload.note.strip(), now, job_id),
+            )
         reason_text = ", ".join(payload.reasons) if payload.reasons else "No quick reason"
         db.execute(
             """
@@ -499,6 +541,67 @@ def submit_feedback(job_id: str, payload: FeedbackIn) -> FeedbackOut:
             ),
         )
     return FeedbackOut(rating=payload.rating, reasons=payload.reasons, note=payload.note.strip(), updated_at=now)
+
+
+@app.post("/api/jobs/{job_id}/regenerate-pack", response_model=JobDetail)
+def regenerate_pack(job_id: str, payload: RegeneratePackIn) -> JobDetail:
+    with connect() as db:
+        row = db.execute(
+            """
+            SELECT j.*, f.rating, f.reasons_json, f.note, f.updated_at AS feedback_updated_at
+            FROM jobs j
+            LEFT JOIN feedback f ON f.job_id = j.id
+            WHERE j.id = ?
+            """,
+            (job_id,),
+        ).fetchone()
+    if row is None:
+        raise HTTPException(status_code=404, detail="Job not found")
+    feedback_reasons = payload.reasons or decode_json(row["reasons_json"], [])
+    feedback_note = payload.note.strip() or (row["note"] or "")
+    detail = _karriere_detail_from_row(row)
+    analysis = _analysis_from_row(row)
+    prepared = _prepare_application_pack(
+        job_id,
+        detail,
+        analysis,
+        force=True,
+        revision_reasons=feedback_reasons,
+        revision_note=feedback_note,
+        revision_state="regenerated",
+    )
+    now = utc_now()
+    with connect() as db:
+        if prepared:
+            db.execute(
+                "UPDATE jobs SET status = 'inbox', reviewed_at = NULL, updated_at = ? WHERE id = ?",
+                (now, job_id),
+            )
+            db.execute(
+                """
+                INSERT INTO activity (id, kind, title, body, job_id, created_at)
+                VALUES (?, 'package', ?, ?, ?, ?)
+                """,
+                (
+                    str(uuid.uuid4()),
+                    f"Regenerated application pack for {row['company']}",
+                    "A new CV and letter version was created from the requested changes.",
+                    job_id,
+                    now,
+                ),
+            )
+        updated = db.execute(
+            """
+            SELECT j.*, f.rating, f.reasons_json, f.note, f.updated_at AS feedback_updated_at
+            FROM jobs j
+            LEFT JOIN feedback f ON f.job_id = j.id
+            WHERE j.id = ?
+            """,
+            (job_id,),
+        ).fetchone()
+    if updated is None:
+        raise HTTPException(status_code=404, detail="Job not found")
+    return _job_detail(updated)
 
 
 @app.get("/api/preferences", response_model=Preferences)
@@ -989,7 +1092,7 @@ def _generated_discovery_queries(preferences: Preferences, enabled_source_ids: s
         role for role in _clean_list(preferences.role_families)
         if role.casefold() not in {priority.casefold() for priority in priority_roles}
     ]
-    locations = _clean_list(preferences.target_locations) or ["Vienna"]
+    locations = _specific_discovery_locations(preferences.target_locations) or ["Wien"]
     queries: list[str] = []
     for role in roles[:6]:
         for location in locations[:2]:
@@ -1171,9 +1274,13 @@ def _promote_karriere_details(
     for detail in details:
         with connect() as db:
             existing = db.execute(
-                "SELECT id, status, score FROM jobs WHERE source_url = ?",
+                "SELECT * FROM jobs WHERE source_url = ?",
                 (detail.url,),
             ).fetchone()
+        if existing is not None and not _karriere_detail_complete(detail):
+            preserved = _karriere_detail_from_row(existing)
+            if _karriere_detail_complete(preserved):
+                detail = preserved
         created = ingest_job(
             JobIngestIn(
                 source_id=detail.source_id,
@@ -1188,13 +1295,49 @@ def _promote_karriere_details(
         )
         if existing is None:
             jobs_added += 1
+        else:
+            # A repeated crawl refreshes source truth while preserving Toni's
+            # lifecycle decision. This corrects stale/wrong locations and lets
+            # newly available structured descriptions replace shell metadata.
+            with connect() as db:
+                db.execute(
+                    """
+                    UPDATE jobs SET title = ?, company = ?, location = ?,
+                        raw_description = ?, extracted_description = ?, updated_at = ?
+                    WHERE id = ?
+                    """,
+                    (
+                        detail.title,
+                        detail.company,
+                        detail.location,
+                        detail.description,
+                        detail.description,
+                        utc_now(),
+                        created.id,
+                    ),
+                )
         if created.status == "bad":
             continue
         analysis = analyze_karriere_job(detail, preferences)
+        update_job_analysis(created.id, analysis)
         if existing is None or existing["score"] is None:
-            update_job_analysis(created.id, analysis)
             jobs_evaluated += 1
-        if analysis.score >= 55 and _prepare_application_pack(created.id, detail, analysis):
+        if created.status == "maybe":
+            # Scheduled runs may refresh source facts, but a requested revision
+            # stays pending until Toni explicitly regenerates it.
+            continue
+        source_was_incomplete = existing is not None and (
+            len((existing["extracted_description"] or "").strip()) < 180
+            or not decode_json(existing["requirements_json"], [])
+            or not decode_json(existing["responsibilities_json"], [])
+        )
+        force_refresh = source_was_incomplete and _application_pack(created.id) is not None
+        if _analysis_allows_pack(analysis) and _prepare_application_pack(
+            created.id,
+            detail,
+            analysis,
+            force=force_refresh,
+        ):
             packs_prepared += 1
     return jobs_added, jobs_evaluated, packs_prepared
 
@@ -1203,17 +1346,40 @@ def _prepare_application_pack(
     job_id: str,
     detail: KarriereJobDetail,
     analysis: JobAnalysisIn,
+    *,
+    force: bool = False,
+    revision_reasons: list[str] | None = None,
+    revision_note: str = "",
+    revision_state: Literal["current", "regenerated"] = "current",
 ) -> bool:
     existing = _application_pack(job_id)
-    if existing is not None and existing.status == "ready":
+    if existing is not None and existing.status == "ready" and not force:
         return False
-    draft = build_application_draft(detail, analysis)
+    if existing is not None and existing.status == "ready" and force:
+        _record_application_pack_version(job_id, existing)
+    if not _analysis_allows_pack(analysis):
+        _store_application_pack(
+            job_id,
+            status="failed",
+            error="Pack blocked because required source facts or hard gates are not satisfied.",
+            revision_reasons=revision_reasons or [],
+            revision_note=revision_note,
+            revision_state=revision_state,
+            now=utc_now(),
+        )
+        return False
+    draft = build_application_draft(detail, analysis, revision_reasons=revision_reasons, revision_note=revision_note)
     now = utc_now()
+    version = (existing.version + 1) if force and existing else (existing.version if existing else 1)
     _store_application_pack(
         job_id,
         status="preparing",
         letter_subject=draft.subject,
         letter_body=draft.body,
+        version=version,
+        revision_state=revision_state,
+        revision_reasons=revision_reasons or [],
+        revision_note=revision_note,
         error=None,
         now=now,
     )
@@ -1222,7 +1388,7 @@ def _prepare_application_pack(
         reference_id = config["reference_resume_id"]
         if not reference_id:
             raise ReactiveResumeError("Base CV is not selected")
-        slug = f"jobflow-{job_id[:16]}"
+        slug = f"jobflow-{job_id[:16]}-v{version}"
         resume_name = f"{detail.company} · {detail.title}"[:160]
         resume_id = next(
             (
@@ -1278,9 +1444,16 @@ def _prepare_application_pack(
             resume_pdf_pages=pages,
             letter_subject=draft.subject,
             letter_body=draft.body,
+            version=version,
+            revision_state=revision_state,
+            revision_reasons=revision_reasons or [],
+            revision_note=revision_note,
             error=None,
             now=utc_now(),
         )
+        ready_pack = _application_pack(job_id)
+        if ready_pack is not None:
+            _record_application_pack_version(job_id, ready_pack)
         with connect() as db:
             db.execute(
                 "INSERT INTO activity(id, kind, title, body, job_id, created_at) VALUES (?, 'package', ?, ?, ?, ?)",
@@ -1299,6 +1472,10 @@ def _prepare_application_pack(
             status="failed",
             letter_subject=draft.subject,
             letter_body=draft.body,
+            version=version,
+            revision_state=revision_state,
+            revision_reasons=revision_reasons or [],
+            revision_note=revision_note,
             error=str(exc)[:300],
             now=utc_now(),
         )
@@ -1310,6 +1487,10 @@ def _store_application_pack(
     *,
     status: Literal["preparing", "ready", "failed"],
     now: str,
+    version: int | None = None,
+    revision_state: Literal["current", "changes_requested", "regenerated"] = "current",
+    revision_reasons: list[str] | None = None,
+    revision_note: str = "",
     resume_id: str | None = None,
     resume_name: str | None = None,
     resume_pdf_pages: int | None = None,
@@ -1321,11 +1502,15 @@ def _store_application_pack(
         db.execute(
             """
             INSERT INTO application_packs(
-                job_id, status, resume_id, resume_name, resume_pdf_pages,
-                letter_subject, letter_body, error, created_at, updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                job_id, status, version, revision_state, revision_reasons_json, revision_note,
+                resume_id, resume_name, resume_pdf_pages, letter_subject, letter_body, error, created_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(job_id) DO UPDATE SET
                 status = excluded.status,
+                version = COALESCE(excluded.version, application_packs.version),
+                revision_state = excluded.revision_state,
+                revision_reasons_json = excluded.revision_reasons_json,
+                revision_note = excluded.revision_note,
                 resume_id = COALESCE(excluded.resume_id, application_packs.resume_id),
                 resume_name = COALESCE(excluded.resume_name, application_packs.resume_name),
                 resume_pdf_pages = COALESCE(excluded.resume_pdf_pages, application_packs.resume_pdf_pages),
@@ -1337,6 +1522,10 @@ def _store_application_pack(
             (
                 job_id,
                 status,
+                version or 1,
+                revision_state,
+                encode_json(revision_reasons or []),
+                revision_note.strip(),
                 resume_id,
                 resume_name,
                 resume_pdf_pages,
@@ -1356,6 +1545,10 @@ def _application_pack(job_id: str) -> ApplicationPackOut | None:
         return None
     return ApplicationPackOut(
         status=row["status"],
+        version=row["version"] or 1,
+        revision_state=row["revision_state"] or "current",
+        revision_reasons=decode_json(row["revision_reasons_json"], []),
+        revision_note=row["revision_note"] or "",
         resume_id=row["resume_id"],
         resume_name=row["resume_name"],
         resume_pdf_pages=row["resume_pdf_pages"],
@@ -1363,6 +1556,148 @@ def _application_pack(job_id: str) -> ApplicationPackOut | None:
         letter_body=row["letter_body"],
         error=row["error"],
         updated_at=row["updated_at"],
+        versions=_application_pack_versions(job_id),
+    )
+
+
+def _application_pack_versions(job_id: str) -> list[ApplicationPackVersionOut]:
+    with connect() as db:
+        rows = db.execute(
+            "SELECT * FROM application_pack_versions WHERE job_id = ? ORDER BY version DESC",
+            (job_id,),
+        ).fetchall()
+    return [
+        ApplicationPackVersionOut(
+            version=row["version"],
+            revision_state=row["revision_state"] or "current",
+            revision_reasons=decode_json(row["revision_reasons_json"], []),
+            revision_note=row["revision_note"] or "",
+            resume_id=row["resume_id"],
+            resume_name=row["resume_name"],
+            resume_pdf_pages=row["resume_pdf_pages"],
+            letter_subject=row["letter_subject"],
+            letter_body=row["letter_body"],
+            created_at=row["created_at"],
+        )
+        for row in rows
+    ]
+
+
+def _application_pack_version(job_id: str, version: int) -> ApplicationPackVersionOut | None:
+    return next((item for item in _application_pack_versions(job_id) if item.version == version), None)
+
+
+def _record_application_pack_version(job_id: str, pack: ApplicationPackOut) -> None:
+    if pack.status != "ready":
+        return
+    with connect() as db:
+        db.execute(
+            """
+            INSERT OR IGNORE INTO application_pack_versions(
+                job_id, version, revision_state, revision_reasons_json, revision_note,
+                resume_id, resume_name, resume_pdf_pages, letter_subject, letter_body, created_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                job_id,
+                pack.version,
+                pack.revision_state,
+                encode_json(pack.revision_reasons),
+                pack.revision_note,
+                pack.resume_id,
+                pack.resume_name,
+                pack.resume_pdf_pages,
+                pack.letter_subject,
+                pack.letter_body,
+                pack.updated_at,
+            ),
+        )
+
+
+def _analysis_allows_pack(analysis: JobAnalysisIn) -> bool:
+    blocking_missing = {
+        "Source description",
+        "Requirements",
+        "Responsibilities",
+        "Exact work location",
+        "Annual salary",
+    }
+    return (
+        analysis.score >= 55
+        and not analysis.hard_gate_reasons
+        and not (blocking_missing & set(analysis.missing_info))
+    )
+
+
+def _karriere_detail_complete(detail: KarriereJobDetail) -> bool:
+    return (
+        len(detail.description.strip()) >= 180
+        and bool(detail.requirements)
+        and bool(detail.responsibilities)
+    )
+
+
+def _ready_pack_sql() -> str:
+    return """
+        j.status = 'inbox'
+        AND COALESCE(j.hard_gate_reasons_json, '[]') = '[]'
+        AND LENGTH(TRIM(COALESCE(j.extracted_description, ''))) >= 180
+        AND COALESCE(j.requirements_json, '[]') != '[]'
+        AND COALESCE(j.responsibilities_json, '[]') != '[]'
+        AND j.location IS NOT NULL
+        AND j.salary_min_annual IS NOT NULL
+        AND EXISTS (
+            SELECT 1
+            FROM application_packs p
+            WHERE p.job_id = j.id
+              AND p.status = 'ready'
+              AND COALESCE(p.revision_state, 'current') != 'changes_requested'
+              AND p.resume_id IS NOT NULL
+              AND p.letter_body IS NOT NULL
+              AND p.resume_pdf_pages = 1
+        )
+    """
+
+
+def _karriere_detail_from_row(row: Any) -> KarriereJobDetail:
+    return KarriereJobDetail(
+        url=row["source_url"],
+        source_id=row["source_id"] or row["id"],
+        title=row["title"],
+        company=row["company"],
+        location=row["location"],
+        description=row["extracted_description"] or row["raw_description"] or row["summary"] or "",
+        salary_display=row["salary_display"],
+        salary_min_annual=row["salary_min_annual"],
+        salary_max_annual=row["salary_max_annual"],
+        work_mode=row["work_mode"],
+        requirements=decode_json(row["requirements_json"], []),
+        responsibilities=decode_json(row["responsibilities_json"], []),
+        technologies=decode_json(row["technologies_json"], []),
+        home_office_days=row["home_office_days"],
+    )
+
+
+def _analysis_from_row(row: Any) -> JobAnalysisIn:
+    return JobAnalysisIn(
+        score=row["score"] or 0,
+        verdict=row["verdict"] or "reject",
+        confidence=row["confidence"],
+        summary=row["summary"],
+        fit_evidence=_normalized_fit_evidence(decode_json(row["fit_evidence_json"], {})),
+        missing_info=decode_json(row["missing_info_json"], []),
+        hard_gate_reasons=decode_json(row["hard_gate_reasons_json"], []),
+        requirements=decode_json(row["requirements_json"], []),
+        responsibilities=decode_json(row["responsibilities_json"], []),
+        technologies=decode_json(row["technologies_json"], []),
+        salary_display=row["salary_display"],
+        salary_min_annual=row["salary_min_annual"],
+        salary_max_annual=row["salary_max_annual"],
+        salary_currency=row["salary_currency"],
+        work_mode=row["work_mode"],
+        home_office_days=row["home_office_days"],
+        language_environment=row["language_environment"],
+        source_evidence=decode_json(row["source_evidence_json"], {}),
     )
 
 
@@ -1476,6 +1811,7 @@ def _job_list_item(row: Any) -> JobListItem:
         source_url=row["source_url"],
         feedback=_feedback_from_row(row),
         pack_status=pack.status if pack is not None else None,
+        pack_revision_state=pack.revision_state if pack is not None else None,
     )
 
 
@@ -1568,6 +1904,15 @@ def _clean_list(values: list[str]) -> list[str]:
         if text and text not in cleaned:
             cleaned.append(text)
     return cleaned
+
+
+def _specific_discovery_locations(values: list[str]) -> list[str]:
+    cleaned = _clean_list(values)
+    if len(cleaned) <= 1:
+        return cleaned
+    broad = {"at", "austria", "österreich", "osterreich"}
+    specific = [value for value in cleaned if value.casefold() not in broad]
+    return specific or cleaned
 
 
 def _auth_config() -> tuple[str, str] | None:
