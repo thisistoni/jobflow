@@ -184,6 +184,7 @@ class DiscoverySearchResult(BaseModel):
 
 
 class DiscoveryRunResult(DiscoverySearchResult):
+    source: str = "open_web"
     matched_queries: list[str] = Field(default_factory=list)
 
 

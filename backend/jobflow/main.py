@@ -23,6 +23,13 @@ from fastapi.responses import JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
+from .agentmail import (
+    AgentMailConfigError,
+    AgentMailProviderError,
+    configured as agentmail_configured,
+    fetch_karriere_alerts,
+    karriere_alerts_active,
+)
 from .database import connect, decode_json, encode_json, init_db, utc_now
 from .firecrawl import FirecrawlConfigError, FirecrawlProviderError, scrape_url, search_web
 from .importer import _stable_id, canonicalize_url
@@ -544,15 +551,16 @@ def update_discovery_config(payload: DiscoveryConfigIn) -> DiscoveryOperationsOu
     except (KeyError, ValueError) as exc:
         raise HTTPException(status_code=422, detail="Unknown discovery timezone") from exc
     now = utc_now()
+    effective_sources = {source.id: source for source in _discovery_operations().sources}
     with connect() as db:
         known_sources = {row["id"]: dict(row) for row in db.execute("SELECT * FROM discovery_sources").fetchall()}
         unknown = sorted(set(payload.sources_enabled) - set(known_sources))
         if unknown:
             raise HTTPException(status_code=422, detail=f"Unknown discovery source: {unknown[0]}")
         for source_id, enabled in payload.sources_enabled.items():
-            source = known_sources[source_id]
-            if enabled and source["status"] != "available":
-                raise HTTPException(status_code=422, detail=f"{source['label']} is {source['status'].replace('_', ' ')}")
+            source = effective_sources[source_id]
+            if enabled and source.status != "available":
+                raise HTTPException(status_code=422, detail=f"{source.label} is {source.status.replace('_', ' ')}")
             db.execute(
                 "UPDATE discovery_sources SET enabled = ?, updated_at = ? WHERE id = ?",
                 (1 if enabled else 0, now, source_id),
@@ -881,6 +889,16 @@ def _discovery_operations() -> DiscoveryOperationsOut:
         if row["id"] in {"open_web", "company_careers"} and not provider_ready:
             status = "setup_required"
             detail = "Configure the JobFlow search provider before enabling this source."
+        if row["id"] == "karriere_alerts":
+            if agentmail_configured() and karriere_alerts_active():
+                status = "available"
+                detail = "Official Job Alarm links are ingested from the configured AgentMail inbox."
+            elif agentmail_configured():
+                status = "setup_required"
+                detail = "AgentMail is connected; karriere.at account confirmation is still pending."
+            else:
+                status = "setup_required"
+                detail = "Connect the AgentMail inbox used for official karriere.at Job Alarms."
         sources.append(
             DiscoverySourceConfig(
                 id=row["id"],
@@ -943,31 +961,60 @@ def _execute_discovery(trigger: Literal["manual", "scheduled"]) -> DiscoveryRunO
     try:
         if not enabled_sources:
             raise HTTPException(status_code=400, detail="Enable at least one available discovery source")
-        if not queries:
+        web_enabled = bool(enabled_sources & {"open_web", "company_careers"})
+        if web_enabled and not queries:
             raise HTTPException(status_code=400, detail="Add at least one role or custom search phrase")
         candidates: dict[str, DiscoveryRunResult] = {}
         candidate_count = 0
-        for query in queries:
-            results = search_web(query, preferences.discovery_limit_per_query)
-            candidate_count += len(results)
-            for item in results:
-                try:
-                    canonical_url = canonicalize_url(item["url"])
-                except ValueError:
-                    continue
-                candidate = candidates.get(canonical_url)
+        if web_enabled:
+            for query in queries:
+                results = search_web(query, preferences.discovery_limit_per_query)
+                candidate_count += len(results)
+                for item in results:
+                    try:
+                        canonical_url = canonicalize_url(item["url"])
+                    except ValueError:
+                        continue
+                    candidate = candidates.get(canonical_url)
+                    if candidate is None:
+                        candidates[canonical_url] = DiscoveryRunResult(
+                            url=canonical_url,
+                            title=item["title"],
+                            description=item["description"],
+                            source="open_web",
+                            matched_queries=[query],
+                        )
+                    elif query not in candidate.matched_queries:
+                        candidate.matched_queries.append(query)
+        if "karriere_alerts" in enabled_sources:
+            with connect() as db:
+                seen_ids = {row["message_id"] for row in db.execute("SELECT message_id FROM agentmail_messages")}
+            alerts = fetch_karriere_alerts(seen_ids)
+            candidate_count += len(alerts.candidates)
+            for item in alerts.candidates:
+                candidate = candidates.get(item.url)
                 if candidate is None:
-                    candidates[canonical_url] = DiscoveryRunResult(
-                        url=canonical_url,
-                        title=item["title"],
-                        description=item["description"],
-                        matched_queries=[query],
+                    candidates[item.url] = DiscoveryRunResult(
+                        url=item.url,
+                        title=item.title,
+                        description="Official karriere.at Job Alarm link.",
+                        source="karriere_alerts",
+                        matched_queries=["karriere.at Job Alarm"],
                     )
-                elif query not in candidate.matched_queries:
-                    candidate.matched_queries.append(query)
+            with connect() as db:
+                db.executemany(
+                    "INSERT OR IGNORE INTO agentmail_messages(message_id, received_at, subject, link_count, processed_at) VALUES (?, ?, ?, ?, ?)",
+                    [(item.message_id, item.received_at, item.subject, item.link_count, utc_now()) for item in alerts.messages],
+                )
     except (FirecrawlConfigError, FirecrawlProviderError) as exc:
         _finish_failed_discovery_run(run_id, str(exc))
         raise _firecrawl_http_exception(exc) from exc
+    except AgentMailConfigError as exc:
+        _finish_failed_discovery_run(run_id, str(exc))
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    except AgentMailProviderError as exc:
+        _finish_failed_discovery_run(run_id, str(exc))
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
     except HTTPException as exc:
         _finish_failed_discovery_run(run_id, str(exc.detail))
         raise
@@ -980,11 +1027,11 @@ def _execute_discovery(trigger: Literal["manual", "scheduled"]) -> DiscoveryRunO
     with connect() as db:
         db.executemany(
             """
-            INSERT INTO discovery_candidates (run_id, url, title, description, matched_queries_json)
-            VALUES (?, ?, ?, ?, ?)
+            INSERT INTO discovery_candidates (run_id, url, source, title, description, matched_queries_json)
+            VALUES (?, ?, ?, ?, ?, ?)
             """,
             [
-                (run_id, item.url, item.title, item.description, encode_json(item.matched_queries))
+                (run_id, item.url, item.source, item.title, item.description, encode_json(item.matched_queries))
                 for item in result_items
             ],
         )

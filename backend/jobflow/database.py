@@ -161,6 +161,7 @@ def init_db(path: str | Path | None = None) -> None:
             CREATE TABLE IF NOT EXISTS discovery_candidates (
                 run_id TEXT NOT NULL REFERENCES discovery_runs(id) ON DELETE CASCADE,
                 url TEXT NOT NULL,
+                source TEXT NOT NULL DEFAULT 'open_web',
                 title TEXT NOT NULL DEFAULT '',
                 description TEXT NOT NULL DEFAULT '',
                 matched_queries_json TEXT NOT NULL DEFAULT '[]',
@@ -169,6 +170,14 @@ def init_db(path: str | Path | None = None) -> None:
 
             CREATE INDEX IF NOT EXISTS idx_discovery_candidates_run
             ON discovery_candidates(run_id);
+
+            CREATE TABLE IF NOT EXISTS agentmail_messages (
+                message_id TEXT PRIMARY KEY,
+                received_at TEXT,
+                subject TEXT NOT NULL DEFAULT '',
+                link_count INTEGER NOT NULL DEFAULT 0,
+                processed_at TEXT NOT NULL
+            );
 
             CREATE TABLE IF NOT EXISTS reactive_resume_config (
                 id INTEGER PRIMARY KEY CHECK(id = 1),
@@ -194,6 +203,7 @@ def init_db(path: str | Path | None = None) -> None:
         _ensure_column(db, "preferences", "discovery_queries_json", "TEXT NOT NULL DEFAULT '[]'")
         _ensure_column(db, "preferences", "discovery_limit_per_query", "INTEGER NOT NULL DEFAULT 5")
         _ensure_column(db, "preferences", "priority_role_families_json", "TEXT NOT NULL DEFAULT '[]'")
+        _ensure_column(db, "discovery_candidates", "source", "TEXT NOT NULL DEFAULT 'open_web'")
         now = utc_now()
         db.execute(
             """
