@@ -1380,6 +1380,15 @@ def _append_untrusted_karriere_details(
                 LENGTH(TRIM(COALESCE(extracted_description, ''))) < 180
                 OR requirements_json = '[]'
                 OR responsibilities_json = '[]'
+                OR EXISTS (
+                  SELECT 1 FROM application_packs ap
+                  WHERE ap.job_id = jobs.id
+                    AND ap.status = 'ready'
+                    AND NOT EXISTS (
+                      SELECT 1 FROM application_pack_versions apv
+                      WHERE apv.job_id = jobs.id
+                    )
+                )
               )
             ORDER BY updated_at DESC
             LIMIT ?

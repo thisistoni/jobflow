@@ -337,13 +337,13 @@ def test_work_mode_variants_and_home_office_days_are_preserved() -> None:
         assert analysis.home_office_days == detail.home_office_days
 
 
-def test_incomplete_historical_jobs_are_backfilled_from_canonical_source(
+def test_incomplete_and_unversioned_historical_jobs_are_backfilled_from_canonical_source(
     tmp_path: Path,
     monkeypatch: Any,
 ) -> None:
     db_path = tmp_path / "backfill.sqlite3"
     os.environ["JOBFLOW_DB"] = str(db_path)
-    from jobflow.database import init_db
+    from jobflow.database import connect, init_db, utc_now
     import jobflow.main as main
 
     init_db(db_path)
@@ -359,6 +359,33 @@ def test_incomplete_historical_jobs_are_backfilled_from_canonical_source(
             extracted_description="Incomplete shell",
         )
     )
+    legacy = main.ingest_job(
+        JobIngestIn(
+            source_id="111222",
+            source_name="karriere.at",
+            source_url="https://www.karriere.at/jobs/111222",
+            title="Legacy Ready Developer",
+            company="Example GmbH",
+            location="Wien",
+            raw_description="Complete verified source description. " * 8,
+            extracted_description="Complete verified source description. " * 8,
+        )
+    )
+    with connect() as db:
+        db.execute(
+            "UPDATE jobs SET requirements_json = ?, responsibilities_json = ? WHERE id = ?",
+            ('["Python"]', '["Build internal tools"]', legacy.id),
+        )
+    main._store_application_pack(
+        legacy.id,
+        status="ready",
+        resume_id="legacy-resume",
+        resume_name="Legacy pack",
+        resume_pdf_pages=1,
+        letter_subject="Bewerbung",
+        letter_body="Letter",
+        now=utc_now(),
+    )
 
     def fake_refresh(detail: KarriereJobDetail) -> KarriereJobDetail:
         detail.description = "Complete verified source description. " * 8
@@ -369,6 +396,5 @@ def test_incomplete_historical_jobs_are_backfilled_from_canonical_source(
     monkeypatch.setattr(main, "refresh_karriere_detail", fake_refresh)
     details: list[KarriereJobDetail] = []
     main._append_untrusted_karriere_details(details)
-    assert len(details) == 1
-    assert details[0].source_id == "987654"
-    assert details[0].requirements == ["Python"]
+    assert {detail.source_id for detail in details} == {"987654", "111222"}
+    assert all(detail.requirements == ["Python"] for detail in details)
