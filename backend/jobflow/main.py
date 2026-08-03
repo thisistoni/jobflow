@@ -654,7 +654,7 @@ def update_preferences(payload: Preferences) -> Preferences:
                 payload.salary_currency,
                 payload.salary_target_min,
                 payload.salary_target_max,
-                payload.acceptable_salary_min,
+                payload.salary_target_min,
                 encode_json(payload.role_families),
                 encode_json(payload.priority_role_families),
                 encode_json(payload.priorities),
@@ -1333,8 +1333,26 @@ def _promote_karriere_details(
             or not decode_json(existing["requirements_json"], [])
             or not decode_json(existing["responsibilities_json"], [])
         )
-        force_refresh = source_was_incomplete and _application_pack(created.id) is not None
-        if _analysis_allows_pack(analysis) and _prepare_application_pack(
+        current_pack = _application_pack(created.id)
+        if not _analysis_allows_pack(analysis):
+            if current_pack is not None and current_pack.status == "ready" and created.status == "inbox":
+                _record_application_pack_version(created.id, current_pack)
+                _store_application_pack(
+                    created.id,
+                    status="failed",
+                    error="Current verified source facts do not pass the saved hard gates.",
+                    revision_state="current",
+                    now=utc_now(),
+                )
+            continue
+        force_refresh = bool(
+            current_pack is not None
+            and (
+                source_was_incomplete
+                or (current_pack.version == 1 and not current_pack.versions)
+            )
+        )
+        if _prepare_application_pack(
             created.id,
             detail,
             analysis,
@@ -1909,7 +1927,8 @@ def _preferences_from_row(row: Any) -> Preferences:
         salary_currency=row["salary_currency"],
         salary_target_min=row["salary_target_min"],
         salary_target_max=row["salary_target_max"],
-        acceptable_salary_min=row["acceptable_salary_min"],
+        # Salary target minimum is the sole public and scoring source of truth.
+        acceptable_salary_min=row["salary_target_min"],
         role_families=decode_json(row["role_families_json"], []),
         priority_role_families=decode_json(row["priority_role_families_json"], []),
         priorities=decode_json(row["priorities_json"], []),

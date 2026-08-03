@@ -485,9 +485,13 @@ def _enrich_detail_from_job_posting(detail: KarriereJobDetail, posting: dict[str
     detail.technologies = _technology_hits(
         " ".join([detail.title, detail.description, *detail.requirements, *detail.responsibilities])
     )
-    parsed_home_office_days = _home_office_days(detail.description)
+    parsed_home_office_days = _home_office_days(detail.description, allow_onsite_zero=False)
     if parsed_home_office_days is not None:
         detail.home_office_days = parsed_home_office_days
+    elif detail.home_office_days == 0 and detail.work_mode and "hybrid" in detail.work_mode.casefold():
+        # A generic "vor Ort" phrase in the advert body is not proof of a
+        # zero-day policy for an otherwise hybrid role.
+        detail.home_office_days = None
 
 
 def _structured_location(value: Any) -> str | None:
@@ -598,7 +602,7 @@ def _annual_salary(display: str | None) -> tuple[int | None, int | None]:
     return min(annual), max(annual)
 
 
-def _home_office_days(display: str | None) -> int | None:
+def _home_office_days(display: str | None, *, allow_onsite_zero: bool = True) -> int | None:
     if not display:
         return None
     folded = display.casefold()
@@ -609,7 +613,7 @@ def _home_office_days(display: str | None) -> int | None:
         return 5 if "voll" in folded or "full" in folded else None
     if "hybrid" in folded:
         return None
-    if "vor ort" in folded or "on-site" in folded or "onsite" in folded:
+    if allow_onsite_zero and ("vor ort" in folded or "on-site" in folded or "onsite" in folded):
         return 0
     return None
 

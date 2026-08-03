@@ -127,8 +127,8 @@ def analyze_karriere_job(job: KarriereJobDetail, preferences: Preferences) -> Jo
         evidence.setdefault("language", []).append(EvidenceItem(origin="job detail", text="German is mentioned in the posting."))
     language_preference = (preferences.language_preference or "").casefold()
     if language_preference:
-        german_ok = "german" in language_preference or "deutsch" in language_preference
-        english_ok = "english" in language_preference or "englisch" in language_preference
+        german_ok = language_preference in {"de", "de-at", "de-de"} or "german" in language_preference or "deutsch" in language_preference
+        english_ok = language_preference in {"en", "en-gb", "en-us"} or "english" in language_preference or "englisch" in language_preference
         posting_german = "deutsch" in folded or "german" in folded
         posting_english = "englisch" in folded or "english" in folded
         if (posting_german or posting_english) and not ((posting_german and german_ok) or (posting_english and english_ok)):

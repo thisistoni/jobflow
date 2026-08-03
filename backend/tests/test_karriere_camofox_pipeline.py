@@ -133,7 +133,7 @@ def test_jobposting_structured_data_supplies_source_truth() -> None:
             "<h4>Anforderungsprofil</h4><ul>"
             "<li>Gute Programmierkenntnisse in C#</li>"
             "<li>Erfahrung mit IEC 61131-3</li></ul>"
-            "<p>Die Rolle verbindet Maschinenbau und Softwareentwicklung.</p>"
+            "<p>Die Rolle verbindet Maschinenbau und Softwareentwicklung. Teamtage finden vor Ort statt.</p>"
         ),
     }
     page = f'<script type="application/ld+json">{json.dumps({"@graph": [{**posting, "@type": ["Thing", "JobPosting"]}]})}</script>'
@@ -142,6 +142,7 @@ def test_jobposting_structured_data_supplies_source_truth() -> None:
     assert shell.company == "WITTMANN Gruppe"
     assert shell.location == "Kottingbrunn"
     assert shell.salary_min_annual == 47_547
+    assert shell.home_office_days is None
     assert shell.requirements == ["Gute Programmierkenntnisse in C#", "Erfahrung mit IEC 61131-3"]
     assert shell.responsibilities == [
         "Entwicklung von Softwarelösungen für Spritzgießmaschinen",
@@ -275,6 +276,11 @@ def test_camofox_candidates_become_visible_jobs_and_declines_stay_suppressed(
     assert legacy_detail.json()["fit_evidence"]["role_fit"][0]["text"] == "Legacy evidence sentence"
 
     declined_id = jobs[0]["id"]
+    remaining = jobs[1]
+    remaining_detail = next(detail for detail in details if detail.url == remaining["source_url"])
+    remaining_detail.salary_min_annual = 35_000
+    remaining_detail.salary_max_annual = 35_000
+    remaining_detail.salary_display = "ab 35.000 € jährlich"
     response = client.post(
         f"/api/jobs/{declined_id}/feedback",
         json={"rating": "bad", "reasons": ["Not for me"], "note": ""},
@@ -288,22 +294,29 @@ def test_camofox_candidates_become_visible_jobs_and_declines_stay_suppressed(
     assert second.json()["jobs_added"] == 0
     declined = client.get(f"/api/jobs/{declined_id}").json()
     assert declined["status"] == "bad"
+    invalidated = client.get(f"/api/jobs/{remaining['id']}").json()
+    assert invalidated["application_pack"]["status"] == "failed"
+    assert invalidated["application_pack"]["versions"][0]["version"] == 1
 
 
 def test_fit_analysis_scores_a_matching_vienna_role() -> None:
+    detail = _detail()
+    detail.description += " Deutsch und Englisch werden im Team verwendet."
     analysis = analyze_karriere_job(
-        _detail(),
+        detail,
         Preferences(
             target_locations=["Vienna"],
             work_modes=["Hybrid"],
             acceptable_salary_min=45_000,
             role_families=["software developer"],
             priority_role_families=["junior software developer"],
+            language_preference="de",
         ),
     )
     assert analysis.score >= 70
     assert analysis.verdict == "strong"
     assert analysis.salary_min_annual == 58_800
+    assert not any("Language environment" in reason for reason in analysis.hard_gate_reasons)
 
 
 def test_work_mode_variants_and_home_office_days_are_preserved() -> None:

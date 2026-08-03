@@ -94,8 +94,8 @@ type ApplicationPack = {
   }>;
 };
 
-function isUserVisibleJob(job: JobListItem): boolean {
-  return job.status !== "inbox" || job.pack_status != null;
+function isUserVisibleJob(job: JobListItem) {
+  return job.status !== "inbox" || job.pack_status === "ready";
 }
 
 type EvidenceItem = {
