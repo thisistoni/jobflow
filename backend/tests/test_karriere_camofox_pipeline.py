@@ -51,6 +51,16 @@ DETAIL_SNAPSHOT = '''
   - heading "Kontakt" [level=3]
 '''
 
+SHELL_DETAIL_SNAPSHOT = '''
+- banner:
+  - link "Logo karriere.at"
+- img "PMC International GmbH"
+- heading "Junior Software Developer (all genders)" [level=1]
+- button "Drucken"
+- link "Jetzt bewerben"
+- heading "Weitere Jobs in Wien" [level=3]
+'''
+
 
 def _detail(job_id: str = "123456") -> KarriereJobDetail:
     return KarriereJobDetail(
@@ -82,6 +92,12 @@ def test_parses_karriere_search_and_detail() -> None:
     assert detail.salary_min_annual == 58_800
     assert detail.work_mode == "Hybrid"
     assert detail.requirements == ["Python und SQL", "2 Jahre praktische Erfahrung"]
+
+    shell = parse_detail_snapshot(SHELL_DETAIL_SNAPSHOT, "https://www.karriere.at/jobs/7847111")
+    assert shell.title == "Junior Software Developer (all genders)"
+    assert shell.company == "PMC International GmbH"
+    assert shell.requirements == []
+    assert "Weitere Jobs" not in shell.description
 
 
 def test_crawl_skips_one_expired_detail_instead_of_aborting(monkeypatch: Any) -> None:

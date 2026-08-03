@@ -182,16 +182,20 @@ def crawl_karriere(
 
         details: list[KarriereJobDetail] = []
         for listing in list(listings.values())[:max_details]:
-            client.navigate(tab_id, listing.url)
+            detail_tab_id = client.create_tab(listing.url)
             try:
-                detail = parse_detail_snapshot(client.snapshot(tab_id), listing.url)
-            except CamofoxProviderError:
-                # Search results can contain listings that expire or redirect between
-                # the result-page snapshot and the detail navigation. Skip that one
-                # candidate; never abort the rest of a multi-job run.
-                continue
-            detail.matched_queries = list(listing.matched_queries)
-            details.append(detail)
+                try:
+                    detail = parse_detail_snapshot(client.snapshot(detail_tab_id), listing.url)
+                except CamofoxProviderError:
+                    # Search results can contain listings that expire or redirect between
+                    # the result-page snapshot and the detail navigation. Skip that one
+                    # candidate; never abort the rest of a multi-job run.
+                    continue
+                _enrich_detail_from_listing(detail, listing)
+                detail.matched_queries = list(listing.matched_queries)
+                details.append(detail)
+            finally:
+                client.close_tab(detail_tab_id)
         if listings and not details:
             raise CamofoxProviderError("Karriere.at search returned listings, but no detail page could be normalized")
         return raw_count, details
@@ -242,17 +246,21 @@ def parse_detail_snapshot(snapshot: str, requested_url: str) -> KarriereJobDetai
     source_id = canonical.rsplit("/", 1)[-1]
     lines = snapshot.splitlines()
     title = _first_heading(lines, level=1)
-    company = _employer_name(lines)
+    company = _employer_name(lines) or _header_company(lines, title)
     location = _term_value(lines, "Dienstorte")
     salary_display = _term_value(lines, "Gehalt")
     work_mode = _term_value(lines, "Arbeitsmodell")
     requirements = _section_items(lines, ("qualifikation", "anforderung", "dein profil", "das bringst du"))
     responsibilities = _section_items(lines, ("rolle und aufgaben", "deine aufgaben", "tätigkeiten", "aufgabengebiet"))
+    has_embedded_detail = any(_line_text(line).casefold() == "über den job" for line in lines)
     meaningful = []
-    for line in lines:
-        text = _line_text(line)
-        if text and text not in meaningful:
-            meaningful.append(text)
+    if has_embedded_detail:
+        for line in lines:
+            text = _line_text(line)
+            if text and text not in meaningful:
+                meaningful.append(text)
+    else:
+        meaningful = [part for part in (title, company) if part]
     description = "\n".join(meaningful)[:30_000]
     technologies = _technology_hits(" ".join([title, description]))
     salary_min, salary_max = _annual_salary(salary_display)
@@ -302,6 +310,39 @@ def _employer_name(lines: list[str]) -> str:
         if match:
             return match.group(1).strip()
     return _term_value(lines, "Arbeitgeber") or ""
+
+
+def _header_company(lines: list[str], title: str) -> str:
+    if not title:
+        return ""
+    for index, line in enumerate(lines):
+        if f'- heading "{title}" [level=1]' not in line:
+            continue
+        for previous in reversed(lines[max(0, index - 4):index]):
+            match = re.search(r'- img "(.+?)"', previous.strip())
+            if match and match.group(1).strip().casefold() != "logo karriere.at":
+                return match.group(1).strip()
+        break
+    return ""
+
+
+def _enrich_detail_from_listing(detail: KarriereJobDetail, listing: KarriereListing) -> None:
+    card = listing.snippet
+    folded = card.casefold()
+    if not detail.location:
+        if "wien" in folded or any("wien" in query.casefold() for query in listing.matched_queries):
+            detail.location = "Wien"
+    if not detail.salary_display and "€" in card:
+        detail.salary_display = card
+        detail.salary_min_annual, detail.salary_max_annual = _annual_salary(card)
+    if not detail.work_mode:
+        if "homeoffice" in folded or "hybrid" in folded:
+            detail.work_mode = "Hybrid"
+        else:
+            detail.work_mode = "On-site"
+    if len(detail.description.splitlines()) <= 2 and card:
+        detail.description = "\n".join(part for part in (detail.title, detail.company, card) if part)[:30_000]
+        detail.technologies = _technology_hits(detail.description)
 
 
 def _term_value(lines: list[str], label: str) -> str | None:
