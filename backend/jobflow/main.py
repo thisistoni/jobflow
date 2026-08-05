@@ -1367,26 +1367,38 @@ def _promote_karriere_details(
 
 
 def _semantic_duplicate_winner(job_id: str) -> str | None:
-    """Return an earlier canonical record for byte-equivalent same-employer adverts."""
+    """Return one canonical record for same-employer adverts differing only by gender markers."""
     with connect() as db:
         current = db.execute(
-            "SELECT company, extracted_description FROM jobs WHERE id = ?",
+            "SELECT id, title, company, extracted_description, first_seen_at FROM jobs WHERE id = ?",
             (job_id,),
         ).fetchone()
         if current is None or len((current["extracted_description"] or "").strip()) < 500:
             return None
         rows = db.execute(
             """
-            SELECT id FROM jobs
+            SELECT id, title, extracted_description, first_seen_at FROM jobs
             WHERE LOWER(TRIM(company)) = LOWER(TRIM(?))
-              AND extracted_description = ?
-            ORDER BY first_seen_at ASC, id ASC
             """,
-            (current["company"], current["extracted_description"]),
+            (current["company"],),
         ).fetchall()
-    if not rows or rows[0]["id"] == job_id:
+    current_title = _normalize_duplicate_text(current["title"])
+    current_description = _normalize_duplicate_text(current["extracted_description"])
+    matches = [
+        row for row in rows
+        if _normalize_duplicate_text(row["title"]) == current_title
+        and _normalize_duplicate_text(row["extracted_description"]) == current_description
+    ]
+    matches.sort(key=lambda row: (row["first_seen_at"], row["id"]))
+    if not matches or matches[0]["id"] == job_id:
         return None
-    return str(rows[0]["id"])
+    return str(matches[0]["id"])
+
+
+def _normalize_duplicate_text(value: str) -> str:
+    folded = value.casefold()
+    folded = re.sub(r"\((?:all genders|[mwfdx*/:\s-]+)\)", " ", folded)
+    return " ".join(re.sub(r"[^a-z0-9äöüß+#.]+", " ", folded).split())
 
 
 def _append_untrusted_karriere_details(

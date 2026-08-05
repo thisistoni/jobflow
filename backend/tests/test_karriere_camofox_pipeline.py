@@ -492,7 +492,8 @@ def test_semantic_duplicate_ads_choose_one_canonical_record(tmp_path: Path) -> N
     import jobflow.main as main
 
     init_db(db_path)
-    description = "Same complete source advertisement. " * 30
+    first_description = "Finance AI & Process Automation Engineer (f/m/d). " + "Same complete source advertisement. " * 30
+    second_description = "Finance AI & Process Automation Engineer (w/m/d). " + "Same complete source advertisement. " * 30
     first = main.ingest_job(
         JobIngestIn(
             source_id="duplicate-1",
@@ -501,8 +502,8 @@ def test_semantic_duplicate_ads_choose_one_canonical_record(tmp_path: Path) -> N
             title="Automation Engineer (f/m/d)",
             company="Duplicate GmbH",
             location="Wien",
-            raw_description=description,
-            extracted_description=description,
+            raw_description=first_description,
+            extracted_description=first_description,
         )
     )
     second = main.ingest_job(
@@ -513,8 +514,8 @@ def test_semantic_duplicate_ads_choose_one_canonical_record(tmp_path: Path) -> N
             title="Automation Engineer (w/m/d)",
             company="Duplicate GmbH",
             location="Wien",
-            raw_description=description,
-            extracted_description=description,
+            raw_description=second_description,
+            extracted_description=second_description,
         )
     )
     winners = {
