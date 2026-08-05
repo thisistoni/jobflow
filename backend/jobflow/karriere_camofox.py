@@ -167,12 +167,14 @@ def crawl_karriere(
     first_url = _search_url(cleaned_queries[0])
     tab_id = client.create_tab(first_url)
     listings: dict[str, KarriereListing] = {}
+    listing_urls_by_query: dict[str, list[str]] = {}
     raw_count = 0
     try:
         for index, query in enumerate(cleaned_queries):
             if index:
                 client.navigate(tab_id, _search_url(query))
             parsed = parse_search_snapshot(client.snapshot(tab_id))[:limit_per_query]
+            listing_urls_by_query[query] = [listing.url for listing in parsed]
             raw_count += len(parsed)
             for listing in parsed:
                 existing = listings.get(listing.url)
@@ -183,7 +185,8 @@ def crawl_karriere(
                     existing.matched_queries.append(query)
 
         details: list[KarriereJobDetail] = []
-        for listing in list(listings.values())[:max_details]:
+        ordered_listings = _fair_listing_order(cleaned_queries, listing_urls_by_query, listings)
+        for listing in ordered_listings[:max_details]:
             detail_tab_id = client.create_tab(listing.url)
             try:
                 try:
@@ -300,7 +303,39 @@ def parse_detail_snapshot(snapshot: str, requested_url: str) -> KarriereJobDetai
 
 
 def _search_url(query: str) -> str:
+    structured = re.fullmatch(r"(.+?)\s+(?:jobs|company careers)\s+([^,]+)", " ".join(query.split()), re.IGNORECASE)
+    if structured:
+        role_slug = _search_slug(structured.group(1))
+        location_slug = _search_slug(structured.group(2))
+        return f"{KARRIERE_SEARCH_URL}/{role_slug}/{location_slug}"
     return f"{KARRIERE_SEARCH_URL}?{urllib.parse.urlencode({'keywords': query})}"
+
+
+def _search_slug(value: str) -> str:
+    slug = re.sub(r"[^\w]+", "-", value.casefold(), flags=re.UNICODE).strip("-")
+    return urllib.parse.quote(slug, safe="-")
+
+
+def _fair_listing_order(
+    queries: list[str],
+    listing_urls_by_query: dict[str, list[str]],
+    listings: dict[str, KarriereListing],
+) -> list[KarriereListing]:
+    """Round-robin result pages so the first role query cannot consume the detail budget."""
+    ordered: list[KarriereListing] = []
+    seen: set[str] = set()
+    width = max((len(listing_urls_by_query.get(query, [])) for query in queries), default=0)
+    for offset in range(width):
+        for query in queries:
+            urls = listing_urls_by_query.get(query, [])
+            if offset >= len(urls):
+                continue
+            url = urls[offset]
+            if url in seen or url not in listings:
+                continue
+            seen.add(url)
+            ordered.append(listings[url])
+    return ordered
 
 
 def _canonical_job_url(value: str) -> str:
@@ -355,7 +390,7 @@ def _enrich_detail_from_listing(detail: KarriereJobDetail, listing: KarriereList
         if "homeoffice" in folded or "hybrid" in folded:
             detail.work_mode = "Hybrid"
             detail.home_office_days = _home_office_days(detail.work_mode)
-        else:
+        elif re.search(r"\b(?:on-site|onsite|vor ort)\b", folded):
             detail.work_mode = "On-site"
             detail.home_office_days = 0
     if len(detail.description.splitlines()) <= 2 and card:
@@ -460,9 +495,16 @@ def _enrich_detail_from_job_posting(detail: KarriereJobDetail, posting: dict[str
                 plain_parts.append(text)
             if tag.startswith("h"):
                 folded = text.casefold()
-                if any(term in folded for term in ("anforder", "dein profil", "qualifikation", "das bringst du", "du bietest")):
+                if any(term in folded for term in (
+                    "anforder", "dein profil", "profil", "qualifikation", "das bringst du", "du bietest",
+                    "requirements", "your skills", "skills that inspire", "what you bring",
+                    "your profile", "must-have skills", "required skills", "qualifications",
+                )):
                     section = "requirements"
-                elif any(term in folded for term in ("aufgaben", "deine rolle", "deine zukünftige rolle", "tätigkeiten", "aufgabengebiet")):
+                elif any(term in folded for term in (
+                    "aufgaben", "deine rolle", "deine zukünftige rolle", "tätigkeiten", "aufgabengebiet",
+                    "responsibilities", "tasks", "your role", "what you'll do", "what you will do",
+                )):
                     section = "responsibilities"
                 else:
                     section = None

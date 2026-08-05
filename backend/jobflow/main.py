@@ -1095,7 +1095,7 @@ def _generated_discovery_queries(preferences: Preferences, enabled_source_ids: s
     ]
     locations = _specific_discovery_locations(preferences.target_locations) or ["Wien"]
     queries: list[str] = []
-    for role in roles[:6]:
+    for role in roles[:12]:
         for location in locations[:2]:
             suffix = " company careers" if enabled_source_ids == {"company_careers"} else " jobs"
             searchable_role = " ".join(role.replace("_", " ").split())
@@ -1155,7 +1155,7 @@ def _execute_discovery(trigger: Literal["manual", "scheduled"]) -> DiscoveryRunO
                 raw_count, karriere_details = crawl_karriere(
                     queries,
                     limit_per_query=preferences.discovery_limit_per_query,
-                    max_details=8,
+                    max_details=min(24, max(8, len(queries) * 2)),
                 )
                 candidate_count += raw_count
                 for item in karriere_details:
@@ -1685,7 +1685,6 @@ def _analysis_allows_pack(analysis: JobAnalysisIn) -> bool:
         "Requirements",
         "Responsibilities",
         "Exact work location",
-        "Annual salary",
     }
     return (
         analysis.score >= 55

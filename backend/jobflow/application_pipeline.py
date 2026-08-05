@@ -56,7 +56,6 @@ def analyze_karriere_job(job: KarriereJobDetail, preferences: Preferences) -> Jo
             hard_gates.append(f"The posting asks for at least {years} years of experience.")
         elif years >= 3:
             score -= 12
-            hard_gates.append(f"The posting asks for at least {years} years of experience.")
         evidence.setdefault("seniority", []).append(
             EvidenceItem(origin="requirement", text=next(item for item in job.requirements if str(years) in item))
         )
@@ -75,13 +74,16 @@ def analyze_karriere_job(job: KarriereJobDetail, preferences: Preferences) -> Jo
     if job.salary_min_annual is not None:
         evidence.setdefault("salary", []).append(EvidenceItem(origin="job detail", text=job.salary_display or ""))
         if acceptable_salary is not None and job.salary_min_annual < acceptable_salary:
-            score -= 24
-            hard_gates.append("Advertised minimum salary is below the saved acceptable minimum.")
+            shortfall = (acceptable_salary - job.salary_min_annual) / acceptable_salary
+            if shortfall > 0.05:
+                score -= 24
+                hard_gates.append("Advertised minimum salary is materially below the saved target minimum.")
+            else:
+                score -= 8
         elif acceptable_salary is not None:
             score += 10
     else:
         missing.append("Annual salary")
-        hard_gates.append("Advertised annual salary is missing.")
 
     if job.work_mode:
         mode = job.work_mode.casefold()
@@ -100,14 +102,14 @@ def analyze_karriere_job(job: KarriereJobDetail, preferences: Preferences) -> Jo
             hard_gates.append(f"Work mode does not match saved commute intent: {job.work_mode}.")
     else:
         missing.append("Work model")
-        if preferences.work_modes:
-            hard_gates.append("Work mode is missing, so saved commute intent cannot be verified.")
 
     if preferences.min_home_office_days is not None:
         if job.home_office_days is None:
             if job.work_mode and "home" in job.work_mode.casefold():
                 evidence.setdefault("work_mode", []).append(EvidenceItem(origin="job detail", text=job.work_mode))
             elif job.work_mode and "hybrid" in job.work_mode.casefold():
+                missing.append("Exact home-office days")
+            elif not job.work_mode:
                 missing.append("Exact home-office days")
             else:
                 hard_gates.append("Home-office days do not satisfy the saved minimum.")
@@ -336,6 +338,8 @@ def _revision_sentence(reasons: list[str], note: str) -> str:
 def _fit_summary(job: KarriereJobDetail, verdict: str, role: str | None, years: int | None) -> str:
     base = f"{job.company} is hiring for {job.title}."
     if verdict == "strong":
+        if years is not None and years >= 3:
+            return f"{base} The role is strategically relevant, but the {years}-year experience request makes it a stretch application."
         return f"{base} The role and Vienna setup align well with your saved builder profile."
     if verdict == "maybe":
         concern = f" The {years}-year experience request needs a closer look." if years else " A few fit details need review."

@@ -10,8 +10,11 @@ from fastapi.testclient import TestClient
 from jobflow.application_pipeline import analyze_karriere_job
 from jobflow.karriere_camofox import (
     KarriereJobDetail,
+    KarriereListing,
     _enrich_detail_from_job_posting,
+    _fair_listing_order,
     _parse_job_posting_html,
+    _search_url,
     parse_detail_snapshot,
     parse_search_snapshot,
 )
@@ -161,6 +164,88 @@ def test_jobposting_structured_data_supplies_source_truth() -> None:
     )
     assert any("Location does not clearly match" in reason for reason in rejected.hard_gate_reasons)
     assert not any("salary" in reason.casefold() for reason in rejected.hard_gate_reasons)
+
+
+def test_english_sections_and_three_year_stretch_are_reviewable() -> None:
+    detail = _detail("10027070")
+    detail.requirements = []
+    detail.responsibilities = []
+    posting = {
+        "@type": "JobPosting",
+        "description": (
+            "<h3>Your responsibilities</h3><ul><li>Build Python and React products</li></ul>"
+            "<h3>Your skills that inspire us</h3><ul>"
+            "<li>A minimum of 3 years of experience as a Fullstack Developer</li>"
+            "<li>Good English; German is a plus</li></ul>"
+            "<h3>Profil</h3><ul><li>Structured and collaborative working style</li></ul>"
+        ),
+    }
+    _enrich_detail_from_job_posting(detail, posting)
+    assert detail.responsibilities == ["Build Python and React products"]
+    assert len(detail.requirements) == 3
+
+    analysis = analyze_karriere_job(
+        detail,
+        Preferences(
+            target_locations=["Wien"],
+            work_modes=["hybrid"],
+            salary_target_min=45_000,
+            role_families=["Fullstack Developer"],
+            language_preference="de",
+        ),
+    )
+    assert not any("3 years" in reason for reason in analysis.hard_gate_reasons)
+    assert analysis.summary and "stretch application" in analysis.summary
+
+    detail.requirements[0] = "A minimum of 5 years of experience as a Fullstack Developer"
+    senior_analysis = analyze_karriere_job(detail, Preferences(target_locations=["Wien"]))
+    assert any("5 years" in reason for reason in senior_analysis.hard_gate_reasons)
+
+
+def test_unknown_work_policy_and_near_target_salary_are_warnings_not_rejections() -> None:
+    detail = _detail("7836773")
+    detail.salary_min_annual = 44_800
+    detail.salary_max_annual = 44_800
+    detail.salary_display = "EUR 3,200 gross/month · 44,800 gross/year"
+    detail.work_mode = None
+    detail.home_office_days = None
+    analysis = analyze_karriere_job(
+        detail,
+        Preferences(
+            target_locations=["Wien"],
+            work_modes=["hybrid", "remote"],
+            min_home_office_days=2,
+            salary_target_min=45_000,
+            role_families=["Junior software developer"],
+        ),
+    )
+    assert not analysis.hard_gate_reasons
+    assert "Work model" in analysis.missing_info
+    assert "Exact home-office days" in analysis.missing_info
+
+    detail.salary_min_annual = 35_000
+    low_salary = analyze_karriere_job(detail, Preferences(target_locations=["Wien"], salary_target_min=45_000))
+    assert any("materially below" in reason for reason in low_salary.hard_gate_reasons)
+
+
+def test_karriere_search_uses_location_slug_and_fair_query_sampling() -> None:
+    assert _search_url("Junior software developer jobs Wien") == (
+        "https://www.karriere.at/jobs/junior-software-developer/wien"
+    )
+    listings = {
+        str(index): KarriereListing(url=str(index), title=str(index), company="Example")
+        for index in range(1, 7)
+    }
+    ordered = _fair_listing_order(
+        ["query-a", "query-b", "query-c"],
+        {
+            "query-a": ["1", "2"],
+            "query-b": ["3", "4"],
+            "query-c": ["5", "6"],
+        },
+        listings,
+    )
+    assert [item.url for item in ordered] == ["1", "3", "5", "2", "4", "6"]
 
 
 def test_crawl_skips_one_expired_detail_instead_of_aborting(monkeypatch: Any) -> None:
