@@ -197,7 +197,7 @@ def test_english_sections_and_three_year_stretch_are_reviewable() -> None:
     assert not any("3 years" in reason for reason in analysis.hard_gate_reasons)
     assert analysis.summary and "stretch application" in analysis.summary
 
-    detail.requirements[0] = "A minimum of 5 years of experience as a Fullstack Developer"
+    detail.requirements[0] = "A minimum of 5+ years of experience as a Fullstack Developer"
     senior_analysis = analyze_karriere_job(detail, Preferences(target_locations=["Wien"]))
     assert any("5 years" in reason for reason in senior_analysis.hard_gate_reasons)
 
@@ -483,3 +483,45 @@ def test_incomplete_and_unversioned_historical_jobs_are_backfilled_from_canonica
     main._append_untrusted_karriere_details(details)
     assert {detail.source_id for detail in details} == {"987654", "111222"}
     assert all(detail.requirements == ["Python"] for detail in details)
+
+
+def test_semantic_duplicate_ads_choose_one_canonical_record(tmp_path: Path) -> None:
+    db_path = tmp_path / "jobflow.sqlite3"
+    os.environ["JOBFLOW_DB"] = str(db_path)
+    from jobflow.database import init_db
+    import jobflow.main as main
+
+    init_db(db_path)
+    description = "Same complete source advertisement. " * 30
+    first = main.ingest_job(
+        JobIngestIn(
+            source_id="duplicate-1",
+            source_name="karriere.at",
+            source_url="https://www.karriere.at/jobs/900001",
+            title="Automation Engineer (f/m/d)",
+            company="Duplicate GmbH",
+            location="Wien",
+            raw_description=description,
+            extracted_description=description,
+        )
+    )
+    second = main.ingest_job(
+        JobIngestIn(
+            source_id="duplicate-2",
+            source_name="karriere.at",
+            source_url="https://www.karriere.at/jobs/900002",
+            title="Automation Engineer (w/m/d)",
+            company="Duplicate GmbH",
+            location="Wien",
+            raw_description=description,
+            extracted_description=description,
+        )
+    )
+    winners = {
+        first.id: main._semantic_duplicate_winner(first.id),
+        second.id: main._semantic_duplicate_winner(second.id),
+    }
+    canonical = [job_id for job_id, duplicate_of in winners.items() if duplicate_of is None]
+    suppressed = [duplicate_of for duplicate_of in winners.values() if duplicate_of is not None]
+    assert len(canonical) == 1
+    assert suppressed == canonical

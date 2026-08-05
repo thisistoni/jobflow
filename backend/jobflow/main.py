@@ -1321,6 +1321,10 @@ def _promote_karriere_details(
         if created.status == "bad":
             continue
         analysis = analyze_karriere_job(detail, preferences)
+        duplicate_winner = _semantic_duplicate_winner(created.id)
+        if duplicate_winner is not None:
+            analysis.hard_gate_reasons.append("Duplicate advertisement already represented by another JobFlow record.")
+            analysis.verdict = "reject"
         update_job_analysis(created.id, analysis)
         if existing is None or existing["score"] is None:
             jobs_evaluated += 1
@@ -1360,6 +1364,29 @@ def _promote_karriere_details(
         ):
             packs_prepared += 1
     return jobs_added, jobs_evaluated, packs_prepared
+
+
+def _semantic_duplicate_winner(job_id: str) -> str | None:
+    """Return an earlier canonical record for byte-equivalent same-employer adverts."""
+    with connect() as db:
+        current = db.execute(
+            "SELECT company, extracted_description FROM jobs WHERE id = ?",
+            (job_id,),
+        ).fetchone()
+        if current is None or len((current["extracted_description"] or "").strip()) < 500:
+            return None
+        rows = db.execute(
+            """
+            SELECT id FROM jobs
+            WHERE LOWER(TRIM(company)) = LOWER(TRIM(?))
+              AND extracted_description = ?
+            ORDER BY first_seen_at ASC, id ASC
+            """,
+            (current["company"], current["extracted_description"]),
+        ).fetchall()
+    if not rows or rows[0]["id"] == job_id:
+        return None
+    return str(rows[0]["id"])
 
 
 def _append_untrusted_karriere_details(
