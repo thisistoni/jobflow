@@ -96,6 +96,7 @@ AUTH_COOKIE_NAME = "jobflow_session"
 AUTH_COOKIE_MAX_AGE_SECONDS = 7 * 24 * 60 * 60
 STATIC_DIR_ENV = "JOBFLOW_STATIC_DIR"
 OPEN_AUTH_API_PATHS = {"/api/auth/status", "/api/auth/login", "/api/auth/logout"}
+_scheduler_heartbeat_at: datetime | None = None
 
 
 @asynccontextmanager
@@ -1075,8 +1076,12 @@ def _discovery_operations() -> DiscoveryOperationsOut:
     preferences = get_preferences()
     enabled_source_ids = {source.id for source in sources if source.enabled and source.status == "available"}
     runs = [_discovery_run_summary(row) for row in run_rows]
+    heartbeat = _scheduler_heartbeat_at
+    scheduler_alive = heartbeat is not None and datetime.now(timezone.utc) - heartbeat <= timedelta(seconds=45)
     return DiscoveryOperationsOut(
         schedule=schedule,
+        scheduler_alive=scheduler_alive,
+        scheduler_heartbeat_at=heartbeat.replace(microsecond=0).isoformat() if heartbeat else None,
         sources=sources,
         generated_queries=_generated_discovery_queries(preferences, enabled_source_ids),
         next_run_at=_next_discovery_run(schedule),
@@ -1913,12 +1918,16 @@ def _next_discovery_run(schedule: DiscoveryScheduleConfig) -> str | None:
 
 
 async def _discovery_scheduler() -> None:
+    global _scheduler_heartbeat_at
     while True:
-        await asyncio.sleep(20)
+        _scheduler_heartbeat_at = datetime.now(timezone.utc)
         try:
             await asyncio.to_thread(_run_due_discovery)
         except Exception:
-            continue
+            pass
+        finally:
+            _scheduler_heartbeat_at = datetime.now(timezone.utc)
+        await asyncio.sleep(20)
 
 
 def _run_due_discovery() -> None:

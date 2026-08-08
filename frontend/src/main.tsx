@@ -180,6 +180,8 @@ type DiscoveryRunSummary = {
 
 type DiscoveryOperations = {
   schedule: { enabled: boolean; timezone: string; times: string[] };
+  scheduler_alive: boolean;
+  scheduler_heartbeat_at?: string | null;
   sources: Array<{
     id: string;
     label: string;

@@ -53,6 +53,8 @@ def test_discovery_operations_generate_queries_persist_history_and_priority_role
     assert operations.json()["generated_queries"][0] == "internal tools developer jobs Wien"
     assert all("_" not in query for query in operations.json()["generated_queries"])
     assert operations.json()["next_run_at"]
+    assert isinstance(operations.json()["scheduler_alive"], bool)
+    assert "scheduler_heartbeat_at" in operations.json()
 
     broad_target_saved = client.put("/api/preferences", json={**preferences, "target_locations": ["Wien", "AT"]})
     assert broad_target_saved.status_code == 200

@@ -292,6 +292,8 @@ class DiscoveryRunSummary(BaseModel):
 
 class DiscoveryOperationsOut(BaseModel):
     schedule: DiscoveryScheduleConfig
+    scheduler_alive: bool = False
+    scheduler_heartbeat_at: str | None = None
     sources: list[DiscoverySourceConfig]
     generated_queries: list[str]
     next_run_at: str | None = None
