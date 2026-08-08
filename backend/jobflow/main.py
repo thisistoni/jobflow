@@ -1444,7 +1444,17 @@ def _append_untrusted_karriere_details(
                     )
                 )
               )
-            ORDER BY updated_at DESC
+            ORDER BY CASE WHEN EXISTS (
+              SELECT 1 FROM application_packs upgrade
+              WHERE upgrade.job_id = jobs.id
+                AND upgrade.status = 'ready'
+                AND (
+                  upgrade.letter_body LIKE '%Die Ausschreibung nennt%'
+                  OR upgrade.letter_body LIKE '%Für diese Rolle greife ich besonders%'
+                  OR upgrade.letter_body LIKE '%design, develop, and maintain%'
+                )
+            ) THEN 0 ELSE 1 END,
+            updated_at DESC
             LIMIT ?
             """,
             (max_details,),
