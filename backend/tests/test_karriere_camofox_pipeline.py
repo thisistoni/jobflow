@@ -350,34 +350,15 @@ def test_camofox_candidates_become_visible_jobs_and_declines_stay_suppressed(
         "analyze_karriere_job",
         lambda detail, _preferences: analyze_karriere_job(detail, matching_preferences),
     )
-    prepared: set[str] = set()
-
-    def fake_prepare(job_id: str, *_args: Any, **_kwargs: Any) -> bool:
-        if job_id in prepared:
-            return False
-        prepared.add(job_id)
-        main._store_application_pack(
-            job_id,
-            status="ready",
-            resume_id=f"resume-{job_id}",
-            resume_name="Prepared pack",
-            resume_pdf_pages=1,
-            letter_subject="Bewerbung",
-            letter_body="Letter",
-            now=utc_now(),
-        )
-        return True
-
-    monkeypatch.setattr(main, "_prepare_application_pack", fake_prepare)
-
     first = client.post("/api/discovery/run")
     assert first.status_code == 200
     assert first.json()["jobs_added"] == 2
     assert first.json()["jobs_evaluated"] == 2
-    assert first.json()["packs_prepared"] == 2
-    jobs = client.get("/api/jobs").json()
+    assert first.json()["packs_prepared"] == 0
+    jobs = client.get("/api/jobs?filter=all").json()
     assert len(jobs) == 2
     assert all(job["score"] is not None for job in jobs)
+    assert all(job["pack_status"] is None for job in jobs)
 
     # Existing production data can contain a string instead of EvidenceItem objects.
     from jobflow.database import connect
@@ -410,8 +391,9 @@ def test_camofox_candidates_become_visible_jobs_and_declines_stay_suppressed(
     declined = client.get(f"/api/jobs/{declined_id}").json()
     assert declined["status"] == "bad"
     invalidated = client.get(f"/api/jobs/{remaining['id']}").json()
-    assert invalidated["application_pack"]["status"] == "failed"
-    assert invalidated["application_pack"]["versions"][0]["version"] == 1
+    assert invalidated["application_pack"] is None
+    assert invalidated["salary_min_annual"] == 35_000
+    assert invalidated["hard_gate_reasons"]
 
 
 def test_fit_analysis_scores_a_matching_vienna_role() -> None:

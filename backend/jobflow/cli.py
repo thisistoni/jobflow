@@ -60,6 +60,10 @@ def build_parser() -> argparse.ArgumentParser:
     analyze_job.add_argument("job_id")
     analyze_job.add_argument("--file", required=True, help="JSON file path, or - for stdin.")
 
+    pack_job = job_commands.add_parser("pack", help="Create a validated application pack from agent-written JSON.")
+    pack_job.add_argument("job_id")
+    pack_job.add_argument("--file", required=True, help="JSON file path, or - for stdin.")
+
     preferences = commands.add_parser("preferences", help="Read or replace search preferences.")
     preference_commands = preferences.add_subparsers(dest="preferences_command", required=True)
     preference_commands.add_parser("get", help="Read search preferences.")
@@ -108,6 +112,8 @@ def dispatch(args: argparse.Namespace, client: "Client") -> Any:
             return client.request("POST", "/api/jobs", read_json(args.file))
         if args.jobs_command == "analyze":
             return client.request("PUT", f"/api/jobs/{args.job_id}/analysis", read_json(args.file))
+        if args.jobs_command == "pack":
+            return client.request("POST", f"/api/jobs/{args.job_id}/agent-pack", read_json(args.file))
     if args.command == "preferences":
         if args.preferences_command == "get":
             return client.request("GET", "/api/preferences")

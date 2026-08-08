@@ -210,6 +210,9 @@ def init_db(path: str | Path | None = None) -> None:
                 resume_pdf_pages INTEGER,
                 letter_subject TEXT,
                 letter_body TEXT,
+                agent_model TEXT,
+                agent_run_id TEXT,
+                critic_notes TEXT,
                 error TEXT,
                 created_at TEXT NOT NULL,
                 updated_at TEXT NOT NULL
@@ -226,6 +229,9 @@ def init_db(path: str | Path | None = None) -> None:
                 resume_pdf_pages INTEGER,
                 letter_subject TEXT,
                 letter_body TEXT,
+                agent_model TEXT,
+                agent_run_id TEXT,
+                critic_notes TEXT,
                 created_at TEXT NOT NULL,
                 PRIMARY KEY (job_id, version)
             );
@@ -247,6 +253,12 @@ def init_db(path: str | Path | None = None) -> None:
         _ensure_column(db, "application_packs", "revision_state", "TEXT NOT NULL DEFAULT 'current'")
         _ensure_column(db, "application_packs", "revision_reasons_json", "TEXT NOT NULL DEFAULT '[]'")
         _ensure_column(db, "application_packs", "revision_note", "TEXT NOT NULL DEFAULT ''")
+        _ensure_column(db, "application_packs", "agent_model", "TEXT")
+        _ensure_column(db, "application_packs", "agent_run_id", "TEXT")
+        _ensure_column(db, "application_packs", "critic_notes", "TEXT")
+        _ensure_column(db, "application_pack_versions", "agent_model", "TEXT")
+        _ensure_column(db, "application_pack_versions", "agent_run_id", "TEXT")
+        _ensure_column(db, "application_pack_versions", "critic_notes", "TEXT")
         now = utc_now()
         db.execute(
             """

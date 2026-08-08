@@ -26,6 +26,9 @@ class ApplicationPackVersionOut(BaseModel):
     resume_pdf_pages: int | None = None
     letter_subject: str | None = None
     letter_body: str | None = None
+    agent_model: str | None = None
+    agent_run_id: str | None = None
+    critic_notes: str | None = None
     created_at: str
 
 
@@ -40,6 +43,9 @@ class ApplicationPackOut(BaseModel):
     resume_pdf_pages: int | None = None
     letter_subject: str | None = None
     letter_body: str | None = None
+    agent_model: str | None = None
+    agent_run_id: str | None = None
+    critic_notes: str | None = None
     error: str | None = None
     updated_at: str
     versions: list[ApplicationPackVersionOut] = Field(default_factory=list)
@@ -101,6 +107,18 @@ class FeedbackIn(BaseModel):
 class RegeneratePackIn(BaseModel):
     reasons: list[str] = Field(default_factory=list, max_length=8)
     note: str = Field(default="", max_length=1200)
+
+
+class AgentPackIn(BaseModel):
+    resume_headline: str = Field(min_length=8, max_length=180)
+    resume_summary_html: str = Field(min_length=80, max_length=2400)
+    letter_subject: str = Field(min_length=8, max_length=240)
+    letter_body: str = Field(min_length=500, max_length=5000)
+    agent_model: str = Field(min_length=3, max_length=120)
+    agent_run_id: str = Field(min_length=3, max_length=160)
+    critic_notes: str = Field(min_length=10, max_length=2400)
+    revision_reasons: list[str] = Field(default_factory=list, max_length=8)
+    revision_note: str = Field(default="", max_length=1200)
 
 
 class JobIngestIn(BaseModel):

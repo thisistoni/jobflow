@@ -170,7 +170,19 @@ def test_request_changes_invalidates_pack_and_regeneration_returns_to_inbox(
     assert len(still_pending["extracted_description"]) >= 180
     assert still_pending["requirements"] == ["Python", "SQL"]
 
-    def fake_prepare(job_id: str, *_args: Any, **_kwargs: Any) -> bool:
+    queued = client.post("/api/jobs/job-1/regenerate-pack", json={})
+    assert queued.status_code == 200
+    queued_body = queued.json()
+    assert queued_body["status"] == "maybe"
+    assert queued_body["application_pack"]["revision_state"] == "changes_requested"
+    assert queued_body["application_pack"]["error"] == "Queued for the Luna application agent."
+
+    def fake_prepare(job_id: str, *_args: Any, **kwargs: Any) -> bool:
+        draft = kwargs["draft"]
+        assert "Python" in draft.body
+        assert kwargs["agent_model"] == "openai/gpt-5.6-luna"
+        assert kwargs["agent_run_id"] == "cron-run-123"
+        assert "claims checked" in kwargs["critic_notes"]
         main._store_application_pack(
             job_id,
             status="ready",
@@ -181,8 +193,11 @@ def test_request_changes_invalidates_pack_and_regeneration_returns_to_inbox(
             resume_id="resume-2",
             resume_name="Example pack v2",
             resume_pdf_pages=1,
-            letter_subject="Bewerbung",
-            letter_body="Regenerated letter",
+            letter_subject=draft.subject,
+            letter_body=draft.body,
+            agent_model=kwargs["agent_model"],
+            agent_run_id=kwargs["agent_run_id"],
+            critic_notes=kwargs["critic_notes"],
             now=utc_now(),
         )
         pack = main._application_pack(job_id)
@@ -191,12 +206,27 @@ def test_request_changes_invalidates_pack_and_regeneration_returns_to_inbox(
         return True
 
     monkeypatch.setattr(main, "_prepare_application_pack", fake_prepare)
-    regenerated = client.post("/api/jobs/job-1/regenerate-pack", json={})
+    regenerated = client.post(
+        "/api/jobs/job-1/agent-pack",
+        json={
+            "resume_headline": "Junior Software Developer | Python & interne Webanwendungen",
+            "resume_summary_html": "<p>Junior IT-Support-Techniker mit Informatikausbildung und praktischer Erfahrung in Python, internen Anwendungen und Automatisierung.</p>",
+            "letter_subject": "Bewerbung als Junior Software Entwickler",
+            "letter_body": ("Sehr geehrte Damen und Herren, Ihre Position verbindet Python und interne Webanwendungen. " * 8),
+            "agent_model": "openai/gpt-5.6-luna",
+            "agent_run_id": "cron-run-123",
+            "critic_notes": "All claims checked against candidate evidence; language and specificity passed.",
+            "revision_reasons": ["Letter needs changes"],
+            "revision_note": "Focus Python.",
+        },
+    )
     assert regenerated.status_code == 200
     body = regenerated.json()
     assert body["status"] == "inbox"
     assert body["application_pack"]["version"] == 2
     assert body["application_pack"]["revision_state"] == "regenerated"
+    assert body["application_pack"]["agent_model"] == "openai/gpt-5.6-luna"
+    assert body["application_pack"]["agent_run_id"] == "cron-run-123"
     assert [item["version"] for item in body["application_pack"]["versions"]] == [2, 1]
     inbox = client.get("/api/jobs").json()
     assert [job["id"] for job in inbox] == ["job-1"]

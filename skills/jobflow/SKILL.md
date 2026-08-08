@@ -64,6 +64,14 @@ Do not overwrite user feedback through analysis. Feedback can be written only wh
 jobflow feedback set <job_id> --rating good --reason "Strong builder fit" --note "Worth preparing"
 ```
 
+6. For a selected job, write and independently review the application content, then send the finished pack to JobFlow:
+
+```bash
+jobflow jobs pack <job_id> --file pack.json
+```
+
+The pack JSON must contain `resume_headline`, `resume_summary_html`, `letter_subject`, `letter_body`, `agent_model`, `agent_run_id`, and concrete `critic_notes`. JobFlow—not the agent—duplicates Base CV, applies only the headline and short profile, renders both PDFs, enforces one page, preserves the previous version, and refuses packs that fail source or writing gates. Never call this command with template prose or without a real model review.
+
 ## Configuration
 
 Read the current preferences before changing them. Apply a complete validated preferences JSON document only when requested or when maintaining the user's established configuration:

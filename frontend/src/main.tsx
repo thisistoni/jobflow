@@ -80,6 +80,9 @@ type ApplicationPack = {
   resume_pdf_pages: number | null;
   letter_subject: string | null;
   letter_body: string | null;
+  agent_model: string | null;
+  agent_run_id: string | null;
+  critic_notes: string | null;
   error: string | null;
   updated_at: string;
   versions: Array<{
@@ -91,6 +94,9 @@ type ApplicationPack = {
     resume_name: string | null;
     resume_pdf_pages: number | null;
     letter_subject: string | null;
+    agent_model: string | null;
+    agent_run_id: string | null;
+    critic_notes: string | null;
     created_at: string;
   }>;
 };
@@ -939,6 +945,7 @@ function JobReview({
             <>
               <PackRow number="01" title="Prepared CV" meta={`${pack.resume_pdf_pages || 1}-page PDF · ${pack.resume_name || "Job-specific Base CV copy"}`} href={`/api/jobs/${job.id}/cv.pdf`} />
               <PackRow number="02" title="Application letter" meta={`PDF · ${pack.letter_subject || "German application letter"}`} href={`/api/jobs/${job.id}/application-letter.pdf`} />
+              {pack.agent_model ? <p className="pack-state-copy">AI: {pack.agent_model} · reviewed · run {pack.agent_run_id}</p> : null}
               {pack.versions?.length > 1 ? (
                 <div className="pack-version-history">
                   <b>VERSION HISTORY</b>
@@ -963,7 +970,7 @@ function JobReview({
           )}
           {pack?.revision_state === "changes_requested" ? (
             <button className="regenerate-action" type="button" onClick={onRegenerate} disabled={saving}>
-              <RefreshCw size={15} /> {saving ? "REGENERATING" : "REGENERATE PACK"}
+              <RefreshCw size={15} /> {saving ? "QUEUEING" : "QUEUE AI REVISION"}
             </button>
           ) : null}
         </section>

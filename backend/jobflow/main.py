@@ -24,7 +24,7 @@ from fastapi.responses import JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
-from .application_pipeline import analyze_karriere_job, application_draft_quality_issues, build_application_draft
+from .application_pipeline import ApplicationDraft, analyze_karriere_job, application_draft_quality_issues
 from .agentmail import (
     AgentMailConfigError,
     AgentMailProviderError,
@@ -47,6 +47,7 @@ from .karriere_camofox import (
 from .letter_pdf import render_application_letter_pdf
 from .models import (
     ActivityItem,
+    AgentPackIn,
     ApplicationPackOut,
     ApplicationPackVersionOut,
     DailyPulseItem,
@@ -546,6 +547,64 @@ def submit_feedback(job_id: str, payload: FeedbackIn) -> FeedbackOut:
     return FeedbackOut(rating=payload.rating, reasons=payload.reasons, note=payload.note.strip(), updated_at=now)
 
 
+@app.post("/api/jobs/{job_id}/agent-pack", response_model=JobDetail)
+def create_agent_pack(job_id: str, payload: AgentPackIn) -> JobDetail:
+    with connect() as db:
+        row = db.execute(
+            """
+            SELECT j.*, f.rating, f.reasons_json, f.note, f.updated_at AS feedback_updated_at
+            FROM jobs j
+            LEFT JOIN feedback f ON f.job_id = j.id
+            WHERE j.id = ?
+            """,
+            (job_id,),
+        ).fetchone()
+    if row is None:
+        raise HTTPException(status_code=404, detail="Job not found")
+    draft = ApplicationDraft(
+        resume_headline=payload.resume_headline,
+        resume_summary_html=payload.resume_summary_html,
+        subject=payload.letter_subject,
+        body=payload.letter_body,
+    )
+    existing_pack = _application_pack(job_id)
+    prepared = _prepare_application_pack(
+        job_id,
+        _karriere_detail_from_row(row),
+        _analysis_from_row(row),
+        force=True,
+        revision_reasons=payload.revision_reasons,
+        revision_note=payload.revision_note,
+        revision_state="regenerated" if existing_pack is not None else "current",
+        draft=draft,
+        agent_model=payload.agent_model,
+        agent_run_id=payload.agent_run_id,
+        critic_notes=payload.critic_notes,
+    )
+    if not prepared:
+        failed_pack = _application_pack(job_id)
+        detail = failed_pack.error if failed_pack is not None else "Agent pack validation failed"
+        raise HTTPException(status_code=422, detail=detail)
+    now = utc_now()
+    with connect() as db:
+        db.execute(
+            "UPDATE jobs SET status = 'inbox', reviewed_at = NULL, updated_at = ? WHERE id = ?",
+            (now, job_id),
+        )
+        updated = db.execute(
+            """
+            SELECT j.*, f.rating, f.reasons_json, f.note, f.updated_at AS feedback_updated_at
+            FROM jobs j
+            LEFT JOIN feedback f ON f.job_id = j.id
+            WHERE j.id = ?
+            """,
+            (job_id,),
+        ).fetchone()
+    if updated is None:
+        raise HTTPException(status_code=404, detail="Job not found")
+    return _job_detail(updated)
+
+
 @app.post("/api/jobs/{job_id}/regenerate-pack", response_model=JobDetail)
 def regenerate_pack(job_id: str, payload: RegeneratePackIn) -> JobDetail:
     with connect() as db:
@@ -562,37 +621,30 @@ def regenerate_pack(job_id: str, payload: RegeneratePackIn) -> JobDetail:
         raise HTTPException(status_code=404, detail="Job not found")
     feedback_reasons = payload.reasons or decode_json(row["reasons_json"], [])
     feedback_note = payload.note.strip() or (row["note"] or "")
-    detail = _karriere_detail_from_row(row)
-    analysis = _analysis_from_row(row)
-    prepared = _prepare_application_pack(
-        job_id,
-        detail,
-        analysis,
-        force=True,
-        revision_reasons=feedback_reasons,
-        revision_note=feedback_note,
-        revision_state="regenerated",
-    )
     now = utc_now()
     with connect() as db:
-        if prepared:
-            db.execute(
-                "UPDATE jobs SET status = 'inbox', reviewed_at = NULL, updated_at = ? WHERE id = ?",
-                (now, job_id),
-            )
-            db.execute(
-                """
-                INSERT INTO activity (id, kind, title, body, job_id, created_at)
-                VALUES (?, 'package', ?, ?, ?, ?)
-                """,
-                (
-                    str(uuid.uuid4()),
-                    f"Regenerated application pack for {row['company']}",
-                    "A new CV and letter version was created from the requested changes.",
-                    job_id,
-                    now,
-                ),
-            )
+        db.execute(
+            """
+            UPDATE application_packs
+            SET revision_state = 'changes_requested', revision_reasons_json = ?,
+                revision_note = ?, error = 'Queued for the Luna application agent.', updated_at = ?
+            WHERE job_id = ?
+            """,
+            (encode_json(feedback_reasons), feedback_note, now, job_id),
+        )
+        db.execute(
+            """
+            INSERT INTO activity (id, kind, title, body, job_id, created_at)
+            VALUES (?, 'package', ?, ?, ?, ?)
+            """,
+            (
+                str(uuid.uuid4()),
+                f"Queued AI regeneration for {row['company']}",
+                "The Luna application agent will create the next CV and letter version.",
+                job_id,
+                now,
+            ),
+        )
         updated = db.execute(
             """
             SELECT j.*, f.rating, f.reasons_json, f.note, f.updated_at AS feedback_updated_at
@@ -1338,11 +1390,6 @@ def _promote_karriere_details(
             # Scheduled runs may refresh source facts, but a requested revision
             # stays pending until Toni explicitly regenerates it.
             continue
-        source_was_incomplete = existing is not None and (
-            len((existing["extracted_description"] or "").strip()) < 180
-            or not decode_json(existing["requirements_json"], [])
-            or not decode_json(existing["responsibilities_json"], [])
-        )
         current_pack = _application_pack(created.id)
         if not _analysis_allows_pack(analysis):
             if current_pack is not None and current_pack.status == "ready" and created.status == "inbox":
@@ -1355,21 +1402,10 @@ def _promote_karriere_details(
                     now=utc_now(),
                 )
             continue
-        force_refresh = bool(
-            current_pack is not None
-            and (
-                source_was_incomplete
-                or (current_pack.version == 1 and not current_pack.versions)
-                or _pack_needs_writer_upgrade(current_pack)
-            )
-        )
-        if _prepare_application_pack(
-            created.id,
-            detail,
-            analysis,
-            force=force_refresh,
-        ):
-            packs_prepared += 1
+        # Search and source normalization are deterministic. Application content is
+        # created only by the scheduled Luna evaluator/writer through /agent-pack.
+        # Existing packs can still be invalidated when refreshed source facts fail
+        # the hard gates, but no template content is generated here.
     return jobs_added, jobs_evaluated, packs_prepared
 
 
@@ -1506,6 +1542,10 @@ def _prepare_application_pack(
     revision_reasons: list[str] | None = None,
     revision_note: str = "",
     revision_state: Literal["current", "regenerated"] = "current",
+    draft: ApplicationDraft | None = None,
+    agent_model: str | None = None,
+    agent_run_id: str | None = None,
+    critic_notes: str | None = None,
 ) -> bool:
     existing = _application_pack(job_id)
     if existing is not None and existing.status == "ready" and not force:
@@ -1523,7 +1563,17 @@ def _prepare_application_pack(
             now=utc_now(),
         )
         return False
-    draft = build_application_draft(detail, analysis, revision_reasons=revision_reasons, revision_note=revision_note)
+    if draft is None or not agent_model or not agent_run_id or not critic_notes:
+        _store_application_pack(
+            job_id,
+            status="failed",
+            error="An agent-authored draft with model, run, and critic metadata is required.",
+            revision_reasons=revision_reasons or [],
+            revision_note=revision_note,
+            revision_state=revision_state,
+            now=utc_now(),
+        )
+        return False
     quality_issues = application_draft_quality_issues(detail, draft)
     if quality_issues:
         _store_application_pack(
@@ -1549,6 +1599,9 @@ def _prepare_application_pack(
         revision_state=revision_state,
         revision_reasons=revision_reasons or [],
         revision_note=revision_note,
+        agent_model=agent_model,
+        agent_run_id=agent_run_id,
+        critic_notes=critic_notes,
         error=None,
         now=now,
     )
@@ -1617,6 +1670,9 @@ def _prepare_application_pack(
             revision_state=revision_state,
             revision_reasons=revision_reasons or [],
             revision_note=revision_note,
+            agent_model=agent_model,
+            agent_run_id=agent_run_id,
+            critic_notes=critic_notes,
             error=None,
             now=utc_now(),
         )
@@ -1665,6 +1721,9 @@ def _store_application_pack(
     resume_pdf_pages: int | None = None,
     letter_subject: str | None = None,
     letter_body: str | None = None,
+    agent_model: str | None = None,
+    agent_run_id: str | None = None,
+    critic_notes: str | None = None,
     error: str | None = None,
 ) -> None:
     with connect() as db:
@@ -1672,8 +1731,9 @@ def _store_application_pack(
             """
             INSERT INTO application_packs(
                 job_id, status, version, revision_state, revision_reasons_json, revision_note,
-                resume_id, resume_name, resume_pdf_pages, letter_subject, letter_body, error, created_at, updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                resume_id, resume_name, resume_pdf_pages, letter_subject, letter_body,
+                agent_model, agent_run_id, critic_notes, error, created_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(job_id) DO UPDATE SET
                 status = excluded.status,
                 version = COALESCE(excluded.version, application_packs.version),
@@ -1685,6 +1745,9 @@ def _store_application_pack(
                 resume_pdf_pages = COALESCE(excluded.resume_pdf_pages, application_packs.resume_pdf_pages),
                 letter_subject = COALESCE(excluded.letter_subject, application_packs.letter_subject),
                 letter_body = COALESCE(excluded.letter_body, application_packs.letter_body),
+                agent_model = COALESCE(excluded.agent_model, application_packs.agent_model),
+                agent_run_id = COALESCE(excluded.agent_run_id, application_packs.agent_run_id),
+                critic_notes = COALESCE(excluded.critic_notes, application_packs.critic_notes),
                 error = excluded.error,
                 updated_at = excluded.updated_at
             """,
@@ -1700,6 +1763,9 @@ def _store_application_pack(
                 resume_pdf_pages,
                 letter_subject,
                 letter_body,
+                agent_model,
+                agent_run_id,
+                critic_notes,
                 error,
                 now,
                 now,
@@ -1723,6 +1789,9 @@ def _application_pack(job_id: str) -> ApplicationPackOut | None:
         resume_pdf_pages=row["resume_pdf_pages"],
         letter_subject=row["letter_subject"],
         letter_body=row["letter_body"],
+        agent_model=row["agent_model"],
+        agent_run_id=row["agent_run_id"],
+        critic_notes=row["critic_notes"],
         error=row["error"],
         updated_at=row["updated_at"],
         versions=_application_pack_versions(job_id),
@@ -1746,6 +1815,9 @@ def _application_pack_versions(job_id: str) -> list[ApplicationPackVersionOut]:
             resume_pdf_pages=row["resume_pdf_pages"],
             letter_subject=row["letter_subject"],
             letter_body=row["letter_body"],
+            agent_model=row["agent_model"],
+            agent_run_id=row["agent_run_id"],
+            critic_notes=row["critic_notes"],
             created_at=row["created_at"],
         )
         for row in rows
@@ -1764,8 +1836,9 @@ def _record_application_pack_version(job_id: str, pack: ApplicationPackOut) -> N
             """
             INSERT OR IGNORE INTO application_pack_versions(
                 job_id, version, revision_state, revision_reasons_json, revision_note,
-                resume_id, resume_name, resume_pdf_pages, letter_subject, letter_body, created_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                resume_id, resume_name, resume_pdf_pages, letter_subject, letter_body,
+                agent_model, agent_run_id, critic_notes, created_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 job_id,
@@ -1778,6 +1851,9 @@ def _record_application_pack_version(job_id: str, pack: ApplicationPackOut) -> N
                 pack.resume_pdf_pages,
                 pack.letter_subject,
                 pack.letter_body,
+                pack.agent_model,
+                pack.agent_run_id,
+                pack.critic_notes,
                 pack.updated_at,
             ),
         )
