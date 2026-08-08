@@ -211,6 +211,27 @@ def test_expired_public_advertisement_is_classified_explicitly() -> None:
         )
 
 
+def test_expired_advertisement_redirect_is_classified_explicitly(monkeypatch: Any) -> None:
+    import jobflow.karriere_camofox as karriere
+
+    class RedirectedResponse:
+        def __enter__(self) -> "RedirectedResponse":
+            return self
+
+        def __exit__(self, *_: Any) -> None:
+            return None
+
+        def geturl(self) -> str:
+            return "https://www.karriere.at/jobs/wien"
+
+        def read(self, _: int) -> bytes:
+            return b"<html></html>"
+
+    monkeypatch.setattr(karriere.urllib.request, "urlopen", lambda *_args, **_kwargs: RedirectedResponse())
+    with pytest.raises(KarriereExpiredError):
+        karriere._fetch_job_posting("https://www.karriere.at/jobs/10025928")
+
+
 def test_unknown_work_policy_and_near_target_salary_are_warnings_not_rejections() -> None:
     detail = _detail("7836773")
     detail.salary_min_annual = 44_800

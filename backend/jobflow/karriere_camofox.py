@@ -433,12 +433,17 @@ class _PostingDescriptionParser(HTMLParser):
 
 
 def _fetch_job_posting(url: str) -> dict[str, Any]:
+    canonical_url = _canonical_job_url(url)
     request = urllib.request.Request(
-        _canonical_job_url(url),
+        canonical_url,
         headers={"Accept": "text/html,application/xhtml+xml", "User-Agent": "JobFlow/1.0"},
     )
     try:
         with urllib.request.urlopen(request, timeout=25) as response:
+            requested_path = urllib.parse.urlsplit(canonical_url).path.rstrip("/")
+            final_path = urllib.parse.urlsplit(response.geturl()).path.rstrip("/")
+            if final_path != requested_path:
+                raise KarriereExpiredError("Karriere.at advertisement redirected away from its canonical job page")
             raw = response.read(2_000_001)
     except (urllib.error.HTTPError, urllib.error.URLError, TimeoutError) as exc:
         raise CamofoxProviderError("Karriere.at structured job fetch failed") from exc
