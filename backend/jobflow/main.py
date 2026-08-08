@@ -38,6 +38,7 @@ from .importer import _stable_id, canonicalize_url
 from .karriere_camofox import (
     CamofoxConfigError,
     CamofoxProviderError,
+    KarriereExpiredError,
     KarriereJobDetail,
     camofox_available,
     crawl_karriere,
@@ -1465,10 +1466,30 @@ def _append_untrusted_karriere_details(
         detail = _karriere_detail_from_row(row)
         try:
             refresh_karriere_detail(detail)
+        except KarriereExpiredError:
+            _expire_ready_job(row["id"])
+            continue
         except CamofoxProviderError:
             continue
         details.append(detail)
         seen.add(detail.url)
+
+
+def _expire_ready_job(job_id: str) -> None:
+    now = utc_now()
+    with connect() as db:
+        db.execute(
+            """
+            UPDATE application_packs
+            SET status = 'failed', error = 'Source advertisement has expired.', updated_at = ?
+            WHERE job_id = ? AND status = 'ready'
+            """,
+            (now, job_id),
+        )
+        db.execute(
+            "UPDATE jobs SET imported_state = 'expired', updated_at = ? WHERE id = ?",
+            (now, job_id),
+        )
 
 
 def _prepare_application_pack(

@@ -5,12 +5,14 @@ import os
 from pathlib import Path
 from typing import Any
 
+import pytest
 from fastapi.testclient import TestClient
 
 from jobflow.application_pipeline import analyze_karriere_job
 from jobflow.karriere_camofox import (
     KarriereJobDetail,
     KarriereListing,
+    KarriereExpiredError,
     _enrich_detail_from_job_posting,
     _fair_listing_order,
     _parse_job_posting_html,
@@ -200,6 +202,13 @@ def test_english_sections_and_three_year_stretch_are_reviewable() -> None:
     detail.requirements[0] = "A minimum of 5+ years of experience as a Fullstack Developer"
     senior_analysis = analyze_karriere_job(detail, Preferences(target_locations=["Wien"]))
     assert any("5 years" in reason for reason in senior_analysis.hard_gate_reasons)
+
+
+def test_expired_public_advertisement_is_classified_explicitly() -> None:
+    with pytest.raises(KarriereExpiredError):
+        _parse_job_posting_html(
+            "<html><body>Der Job Software Tester in Wien ist auf karriere.at leider nicht mehr verfügbar.</body></html>"
+        )
 
 
 def test_unknown_work_policy_and_near_target_salary_are_warnings_not_rejections() -> None:
