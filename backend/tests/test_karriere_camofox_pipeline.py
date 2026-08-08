@@ -207,7 +207,7 @@ def test_english_sections_and_three_year_stretch_are_reviewable() -> None:
 def test_expired_public_advertisement_is_classified_explicitly() -> None:
     with pytest.raises(KarriereExpiredError):
         _parse_job_posting_html(
-            "<html><body>Der Job Software Tester in Wien ist auf karriere.at leider nicht mehr verfügbar.</body></html>"
+            "<html><body>Der Job <b>Software Tester</b> in <b>Wien</b> bei Annny GmbH ist auf karriere.at leider nicht mehr verfügbar.</body></html>"
         )
 
 

@@ -470,7 +470,7 @@ def _parse_job_posting_html(page_html: str) -> dict[str, Any]:
             graph = item.get("@graph")
             if isinstance(graph, list):
                 queue.extend(graph)
-    if "ist auf karriere.at leider nicht mehr verfügbar" in page_html.casefold():
+    if "leider nicht mehr verfügbar" in page_html.casefold():
         raise KarriereExpiredError("Karriere.at advertisement has expired")
     raise CamofoxProviderError("Karriere.at page did not contain JobPosting structured data")
 
