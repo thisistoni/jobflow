@@ -24,7 +24,7 @@ from fastapi.responses import JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
-from .application_pipeline import analyze_karriere_job, build_application_draft
+from .application_pipeline import analyze_karriere_job, application_draft_quality_issues, build_application_draft
 from .agentmail import (
     AgentMailConfigError,
     AgentMailProviderError,
@@ -1354,6 +1354,7 @@ def _promote_karriere_details(
             and (
                 source_was_incomplete
                 or (current_pack.version == 1 and not current_pack.versions)
+                or _pack_needs_writer_upgrade(current_pack)
             )
         )
         if _prepare_application_pack(
@@ -1401,6 +1402,15 @@ def _normalize_duplicate_text(value: str) -> str:
     return " ".join(re.sub(r"[^a-z0-9äöüß+#.]+", " ", folded).split())
 
 
+def _pack_needs_writer_upgrade(pack: Any) -> bool:
+    body = (pack.letter_body or "").casefold()
+    return any(marker in body for marker in (
+        "die ausschreibung nennt",
+        "für diese rolle greife ich besonders",
+        "design, develop, and maintain",
+    ))
+
+
 def _append_untrusted_karriere_details(
     details: list[KarriereJobDetail],
     *,
@@ -1423,9 +1433,14 @@ def _append_untrusted_karriere_details(
                   SELECT 1 FROM application_packs ap
                   WHERE ap.job_id = jobs.id
                     AND ap.status = 'ready'
-                    AND NOT EXISTS (
-                      SELECT 1 FROM application_pack_versions apv
-                      WHERE apv.job_id = jobs.id
+                    AND (
+                      NOT EXISTS (
+                        SELECT 1 FROM application_pack_versions apv
+                        WHERE apv.job_id = jobs.id
+                      )
+                      OR ap.letter_body LIKE '%Die Ausschreibung nennt%'
+                      OR ap.letter_body LIKE '%Für diese Rolle greife ich besonders%'
+                      OR ap.letter_body LIKE '%design, develop, and maintain%'
                     )
                 )
               )
@@ -1473,6 +1488,20 @@ def _prepare_application_pack(
         )
         return False
     draft = build_application_draft(detail, analysis, revision_reasons=revision_reasons, revision_note=revision_note)
+    quality_issues = application_draft_quality_issues(detail, draft)
+    if quality_issues:
+        _store_application_pack(
+            job_id,
+            status="failed",
+            letter_subject=draft.subject,
+            letter_body=draft.body,
+            revision_reasons=revision_reasons or [],
+            revision_note=revision_note,
+            revision_state=revision_state,
+            error="Draft quality gate failed: " + "; ".join(quality_issues)[:240],
+            now=utc_now(),
+        )
+        return False
     now = utc_now()
     version = (existing.version + 1) if force and existing else (existing.version if existing else 1)
     _store_application_pack(
@@ -1911,6 +1940,7 @@ def _job_list_item(row: Any) -> JobListItem:
         salary_display=row["salary_display"],
         work_mode=row["work_mode"],
         missing_info=decode_json(row["missing_info_json"], []),
+        first_seen_at=row["first_seen_at"],
         source_url=row["source_url"],
         feedback=_feedback_from_row(row),
         pack_status=pack.status if pack is not None else None,
@@ -1959,7 +1989,6 @@ def _job_detail(row: Any) -> JobDetail:
         home_office_days=row["home_office_days"],
         language_environment=row["language_environment"],
         imported_state=row["imported_state"],
-        first_seen_at=row["first_seen_at"],
         updated_at=row["updated_at"],
         reviewed_at=row["reviewed_at"],
         application_pack=pack,

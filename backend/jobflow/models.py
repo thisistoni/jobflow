@@ -58,6 +58,7 @@ class JobListItem(BaseModel):
     salary_display: str | None = None
     work_mode: str | None = None
     missing_info: list[str] = Field(default_factory=list)
+    first_seen_at: str
     source_url: str
     feedback: FeedbackOut | None = None
     pack_status: Literal["preparing", "ready", "failed"] | None = None
@@ -86,7 +87,6 @@ class JobDetail(JobListItem):
     home_office_days: int | None = None
     language_environment: str | None = None
     imported_state: str | None = None
-    first_seen_at: str
     updated_at: str
     reviewed_at: str | None = None
     application_pack: ApplicationPackOut | None = None

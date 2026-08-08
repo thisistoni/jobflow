@@ -186,48 +186,132 @@ def build_application_draft(
     revision_reasons: list[str] | None = None,
     revision_note: str = "",
 ) -> ApplicationDraft:
+    """Write from verified profile evidence instead of echoing advertisement language."""
+    del analysis, revision_reasons, revision_note
     role = job.title.strip()
     company = job.company.strip()
-    angle = _job_angle(job)
-    skills = _tailored_skill_phrase(job)
-    source_focus = _source_focus(job)
-    revision = _revision_sentence(revision_reasons or [], revision_note)
-    subject = f"Bewerbung als {role}"
+    profile = _application_profile(job)
     paragraphs = [
         "Sehr geehrte Damen und Herren,",
+        f"ich bewerbe mich als {role} bei {company}. {profile['opening']}",
+        profile["evidence"],
         (
-            f"die Position als {role} bei {company} interessiert mich, weil sie praktische Softwareentwicklung "
-            f"mit {angle} verbindet."
+            "Meine Ausbildung an der HTL Spengergasse hat mir ein breites Informatik-Fundament gegeben. "
+            f"{profile['growth']}"
         ),
-        (
-            "In meiner aktuellen Tätigkeit im IT-Support bei SEW-EURODRIVE entwickle ich neben dem operativen "
-            f"Support Automatisierungen und interne Anwendungen. Für diese Rolle greife ich besonders {skills} auf. Dabei arbeite ich unter anderem mit Python sowie "
-            "mit Prozess- und Systemintegrationen und reduziere manuellen Aufwand in wiederkehrenden Abläufen."
-        ),
-        (
-            "Meine Informatikausbildung an der HTL Spengergasse gibt mir ein breites technisches Fundament. "
-            f"Die Ausschreibung nennt {source_focus}; darauf kann ich meine praktische Erfahrung "
-            "in Software, internen Webanwendungen und Automatisierung gezielt ausrichten."
-        ),
-        revision,
-        (
-            f"Gerne erläutere ich persönlich, wie ich diese Erfahrung in die ausgeschriebene Position bei {company} einbringen kann."
-        ),
+        f"{profile['contribution']} Über ein persönliches Gespräch freue ich mich.",
         "Mit freundlichen Grüßen\nAntonio Beslic",
     ]
-    paragraphs = [paragraph for paragraph in paragraphs if paragraph]
-    resume_headline = "Software · interne Anwendungen · Automatisierung"
     resume_summary = (
-        f"Informatik-Absolvent der HTL Spengergasse mit Praxis in IT-Support, Python-Anwendungen, internen Tools "
-        f"und Prozessautomatisierung. Für {html.escape(role)} bei {html.escape(company)} stehen "
-        f"{html.escape(skills)} und {html.escape(source_focus)} im Vordergrund."
+        f"HTL-Informatik-Absolvent und Junior Software Developer mit Praxis in IT-Support, Python-Anwendungen, "
+        f"internen Webanwendungen und Prozessautomatisierung. {profile['resume_focus']}"
     )
     return ApplicationDraft(
-        subject=subject,
+        subject=f"Bewerbung als {role}",
         body="\n\n".join(paragraphs),
-        resume_headline=resume_headline,
-        resume_summary_html=f"<p>{resume_summary}</p>",
+        resume_headline=profile["headline"],
+        resume_summary_html=f"<p>{html.escape(resume_summary)}</p>",
     )
+
+
+def application_draft_quality_issues(job: KarriereJobDetail, draft: ApplicationDraft) -> list[str]:
+    """Reject generic, copied, malformed, or evidence-free application drafts."""
+    body = " ".join(draft.body.split())
+    normalized_body = _normalize_prose(body)
+    issues: list[str] = []
+    if job.title not in draft.body or job.company not in draft.body:
+        issues.append("Role or company is missing from the letter")
+    if "SEW-EURODRIVE" not in draft.body:
+        issues.append("No concrete current-work evidence")
+    banned = (
+        "Die Ausschreibung nennt",
+        "Für diese Rolle greife ich besonders",
+        "Auf Basis der Review-Notiz",
+        "design, develop, and maintain",
+    )
+    if any(phrase.casefold() in draft.body.casefold() for phrase in banned):
+        issues.append("Template or mixed-language source fragment detected")
+    for source_item in [*job.requirements, *job.responsibilities]:
+        normalized_source = _normalize_prose(source_item)
+        if len(normalized_source.split()) >= 8 and normalized_source in normalized_body:
+            issues.append("Advertisement sentence copied into application prose")
+            break
+    words = re.findall(r"\b[\wÄÖÜäöüß-]+\b", draft.body)
+    if not 120 <= len(words) <= 260:
+        issues.append("Letter length is outside the concise review range")
+    if "UiPath" not in draft.body and "Python" not in draft.body and "Webanwendungen" not in draft.body:
+        issues.append("No specific candidate evidence appears in the letter")
+    summary_text = re.sub(r"<[^>]+>", " ", html.unescape(draft.resume_summary_html))
+    if job.title in summary_text or any(
+        _normalize_prose(item) in _normalize_prose(summary_text)
+        for item in [*job.requirements, *job.responsibilities]
+        if len(_normalize_prose(item).split()) >= 8
+    ):
+        issues.append("CV summary echoes the advertisement instead of profile evidence")
+    return issues
+
+
+def _application_profile(job: KarriereJobDetail) -> dict[str, str]:
+    title = job.title.casefold()
+    if any(term in title for term in ("test automation", "software tester", "quality assurance", "qa automation", "testautomatis")):
+        return {
+            "opening": "Automatisierung ist für mich dann gut, wenn sie nicht nur einmal funktioniert, sondern wiederholbar, nachvollziehbar und zuverlässig bleibt.",
+            "evidence": (
+                "Bei SEW-EURODRIVE verbinde ich operativen IT-Support mit eigener Entwicklungsarbeit. Ich erstelle "
+                "UiPath- und Python-Automatisierungen, prüfe Abläufe mit realistischen Fällen und verbessere sie dort, "
+                "wo im Alltag Fehler oder unnötige manuelle Schritte auftreten. Die Nähe zu den Anwendern hilft mir, "
+                "Probleme konkret zu reproduzieren statt nur technisch zu betrachten."
+            ),
+            "growth": "Ich möchte diese Praxis gezielt in Richtung Testautomatisierung und verlässlicher Softwarequalität ausbauen.",
+            "contribution": f"In der Position bei {job.company} kann ich meine Automatisierungspraxis, meine sorgfältige Fehlersuche und meinen Blick für nutzbare interne Systeme verbinden.",
+            "headline": "Junior Test Automation Developer · Python · UiPath",
+            "resume_focus": "Praxis in wiederholbaren Automatisierungsabläufen, technischer Fehlersuche und nutzernahem IT-Support.",
+        }
+    if any(term in title for term in ("finance", "accounting", "controlling", "finanz")):
+        return {
+            "opening": "Mich motiviert es, wiederkehrende Finanzprozesse so zu automatisieren, dass daraus im Arbeitsalltag eine spürbare Entlastung entsteht.",
+            "evidence": (
+                "In meiner aktuellen Tätigkeit im IT-Support bei SEW-EURODRIVE habe ich für den Finanzbereich "
+                "UiPath-Automatisierungen umgesetzt. Dabei habe ich manuelle Abläufe verstanden, in technische Schritte "
+                "übersetzt und mit den beteiligten Fachanwendern abgestimmt. Zusätzlich entwickle ich Python-Anwendungen "
+                "und interne Tools, wenn ein schlanker eigener Lösungsweg besser passt."
+            ),
+            "growth": "Gerade die Verbindung aus Fachprozess, Automatisierung und Softwareentwicklung ist die Richtung, in der ich mich weiterentwickeln möchte.",
+            "contribution": f"Bei {job.company} möchte ich diese praktische Automatisierungserfahrung einbringen und Finance-Prozesse Schritt für Schritt zuverlässiger und einfacher machen.",
+            "headline": "Junior Automation Developer · Python · UiPath · interne Tools",
+            "resume_focus": "Erfahrung mit UiPath-Automatisierungen für den Finanzbereich sowie mit Python-basierten internen Tools.",
+        }
+    normalized_title = _normalize_role_text(job.title)
+    if any(term in normalized_title for term in ("fullstack", "full stack", "frontend", "backend", "web application", "java developer", "software developer")):
+        return {
+            "opening": "Mich reizt an Softwareentwicklung besonders, aus einem konkreten Problem ein Werkzeug zu bauen, das Menschen im Alltag wirklich verwenden können.",
+            "evidence": (
+                "Neben meiner Arbeit im IT-Support bei SEW-EURODRIVE entwickle ich Python-Anwendungen, interne "
+                "Webanwendungen und Automatisierungen. Dadurch kenne ich sowohl die technische Umsetzung als auch die "
+                "Fragen, die im Betrieb wichtig werden: verständliche Abläufe, saubere Übergaben und Lösungen, die für "
+                "Anwender nicht unnötig kompliziert sind."
+            ),
+            "growth": "Neue Frameworks und Sprachen erschließe ich mir über konkrete Projekte; mein Schwerpunkt liegt auf schnellem Lernen und soliden Grundlagen statt auf vorgetäuschter Seniorität.",
+            "contribution": f"Bei {job.company} möchte ich als Junior Entwickler Verantwortung übernehmen, verlässlich dazulernen und an Anwendungen mitarbeiten, die einen klaren Zweck erfüllen.",
+            "headline": "Junior Software Developer · Python · interne Webanwendungen",
+            "resume_focus": "Praxis im Bau interner Anwendungen und Automatisierungen mit engem Bezug zu echten Anwenderproblemen.",
+        }
+    return {
+        "opening": "Ich möchte Software und Automatisierung dort einsetzen, wo sie wiederkehrende Arbeit einfacher und verlässlicher machen.",
+        "evidence": (
+            "In meiner aktuellen Tätigkeit im IT-Support bei SEW-EURODRIVE entwickle ich zusätzlich Python-Anwendungen, "
+            "interne Webanwendungen sowie UiPath- und SAP-nahe Automatisierungen. Dabei übersetze ich Anforderungen aus "
+            "dem Arbeitsalltag in kleine, wartbare Lösungen und stimme sie direkt mit den betroffenen Anwendern ab."
+        ),
+        "growth": "Diese Verbindung aus Technik, Prozessverständnis und schneller Einarbeitung möchte ich in einer Junior-Entwicklerrolle weiter ausbauen.",
+        "contribution": f"Bei {job.company} kann ich praktische Automatisierungserfahrung, Supportnähe und Freude am Bauen sinnvoll zusammenbringen.",
+        "headline": "Junior Software & Automation Developer · Python · interne Tools",
+        "resume_focus": "Praxis in Python-Anwendungen, internen Webanwendungen, UiPath und prozessnaher Automatisierung.",
+    }
+
+
+def _normalize_prose(value: str) -> str:
+    return " ".join(re.sub(r"[^a-z0-9äöüß+#.]+", " ", value.casefold()).split())
 
 
 def _role_match(values: list[str], title: str) -> str | None:

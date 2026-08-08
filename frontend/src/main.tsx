@@ -62,6 +62,7 @@ type JobListItem = {
   salary_display?: string | null;
   work_mode?: string | null;
   missing_info: string[];
+  first_seen_at: string;
   source_url: string;
   feedback?: Feedback | null;
   pack_status?: "preparing" | "ready" | "failed" | null;
@@ -687,6 +688,7 @@ function App() {
             loading={loading}
             discoveryRunning={discoveryRunning}
             discoveryMessage={discoveryMessage}
+            operations={discoveryOperations}
             pulse={pulse}
             error={error || discoveryError}
             counts={{ inboxCount, strongCount }}
@@ -722,6 +724,7 @@ function InboxScreen({
   loading,
   discoveryRunning,
   discoveryMessage,
+  operations,
   pulse,
   error,
   counts,
@@ -738,6 +741,7 @@ function InboxScreen({
   loading: boolean;
   discoveryRunning: boolean;
   discoveryMessage: string | null;
+  operations: DiscoveryOperations | null;
   pulse: DashboardPulse;
   error: string | null;
   counts: { inboxCount: number; strongCount: number };
@@ -772,7 +776,9 @@ function InboxScreen({
           <strong>{jobs.length.toString().padStart(2, "0")}</strong>
           <div>
             <h2>{filter === "inbox" ? "application packs ready" : "jobs in this view"}</h2>
-            <p>{filter === "inbox" ? "Prepared CV + PDF application letter" : "Only complete packs and reviewed history are shown"}</p>
+            <p>{filter === "inbox" && operations?.last_run
+              ? `Last search ${formatDateTime(operations.last_run.finished_at || operations.last_run.started_at)} · ${operations.last_run.jobs_added} new · ${operations.last_run.packs_prepared} packs`
+              : filter === "inbox" ? "Prepared CV + PDF application letter" : "Only complete packs and reviewed history are shown"}</p>
           </div>
         </div>
         <PulseBars days={pulse.days} />
@@ -809,7 +815,7 @@ function InboxScreen({
               <span>{shortSalary(featured)}</span>
               <span>{(featured.work_mode || "Role").toUpperCase()}</span>
               {featured.pack_status === "ready" ? <span>PACK READY</span> : null}
-              <span>{formatAge(featured.feedback?.updated_at)}</span>
+              <span>FOUND {formatFoundDate(featured.first_seen_at)}</span>
             </div>
             <div className="featured-why">
               <Target size={15} />
@@ -824,7 +830,7 @@ function InboxScreen({
               <span className={`company-mark tint-${index % 4}`}>{initial(job.company)}</span>
               <span className="match-copy">
                 <strong>{job.title}</strong>
-                <small>{job.company.toUpperCase()} · {compactLocation(job).toUpperCase()} · {shortSalary(job)} · {job.score ?? "--"}%{job.pack_status === "ready" ? " · PACK READY" : ""}</small>
+                <small>{job.company.toUpperCase()} · {compactLocation(job).toUpperCase()} · {shortSalary(job)} · {job.score ?? "--"}%{job.pack_status === "ready" ? " · PACK READY" : ""} · FOUND {formatFoundDate(job.first_seen_at)}</small>
               </span>
               <ArrowUpRight size={17} />
             </button>
@@ -892,7 +898,7 @@ function JobReview({
           <strong>{job.score ?? "--"}</strong>
           <span>
             <b>MATCH SCORE</b>
-            <small>{job.verdict || "Preserved for review"} · {job.confidence || "confidence unknown"}</small>
+            <small>{job.verdict || "Preserved for review"} · {job.confidence || "confidence unknown"} · Found {formatFoundDate(job.first_seen_at, true)}</small>
           </span>
         </div>
       </header>
@@ -2202,9 +2208,13 @@ function formatDateTime(value: string) {
   return new Intl.DateTimeFormat(undefined, { month: "short", day: "2-digit", hour: "2-digit", minute: "2-digit" }).format(new Date(value)).toUpperCase();
 }
 
-function formatAge(value?: string) {
-  if (!value) return "NEW";
-  return new Intl.DateTimeFormat(undefined, { month: "short", day: "2-digit" }).format(new Date(value)).toUpperCase();
+function formatFoundDate(value: string, includeYear = false) {
+  return new Intl.DateTimeFormat("en-GB", {
+    timeZone: "Europe/Vienna",
+    day: "numeric",
+    month: "short",
+    ...(includeYear ? { year: "numeric" as const } : {})
+  }).format(new Date(value)).toUpperCase();
 }
 
 function compactLocation(job: Pick<JobListItem, "location" | "work_mode">) {
