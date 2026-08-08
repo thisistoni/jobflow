@@ -128,6 +128,15 @@ def init_db(path: str | Path | None = None) -> None:
                 created_at TEXT NOT NULL
             );
 
+            CREATE TABLE IF NOT EXISTS agent_tokens (
+                id TEXT PRIMARY KEY,
+                label TEXT NOT NULL,
+                token_hash TEXT NOT NULL UNIQUE,
+                created_at TEXT NOT NULL,
+                last_used_at TEXT,
+                revoked_at TEXT
+            );
+
             CREATE TABLE IF NOT EXISTS discovery_config (
                 id TEXT PRIMARY KEY CHECK (id = 'default'),
                 schedule_enabled INTEGER NOT NULL DEFAULT 1,

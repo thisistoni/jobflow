@@ -53,12 +53,20 @@ def test_app_session_auth_and_basic_api_client(tmp_path: Path, monkeypatch: Any)
     assert client.get("/api/auth/status").json()["authenticated"] is True
     assert client.get("/api/jobs").status_code == 200
 
+    created_token = client.post("/api/agent-tokens", json={"label": "Hermes test agent"})
+    assert created_token.status_code == 200
+    agent_token = created_token.json()["token"]
+    assert len(agent_token) >= 32
+
     logout = client.post("/api/auth/logout")
     assert logout.status_code == 200
     assert logout.json() == {"auth_required": True, "authenticated": False, "expires_at": None}
     after_logout = client.get("/api/jobs")
     assert after_logout.status_code == 401
     assert "www-authenticate" not in after_logout.headers
+
+    bearer = client.get("/api/jobs", headers={"Authorization": f"Bearer {agent_token}"})
+    assert bearer.status_code == 200
 
     token = base64.b64encode(b"jobflow-user:jobflow-pass").decode("ascii")
     basic = client.get("/api/jobs", headers={"Authorization": f"Basic {token}"})

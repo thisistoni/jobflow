@@ -16,6 +16,7 @@ DEFAULT_BASE_URL = "http://127.0.0.1:8000"
 BASE_URL_ENV = "JOBFLOW_URL"
 AUTH_USERNAME_ENV = "JOBFLOW_AUTH_USERNAME"
 AUTH_PASSWORD_ENV = "JOBFLOW_AUTH_PASSWORD"
+AGENT_TOKEN_ENV = "JOBFLOW_AGENT_TOKEN"
 JOB_FILTERS = ["inbox", "strong", "maybe", "low", "reviewed", "unanalyzed", "all"]
 
 
@@ -153,6 +154,8 @@ class Client:
     def __init__(self, base_url: str) -> None:
         self.base_url = base_url.rstrip("/")
         self.auth_header = basic_auth_header_from_env()
+        if os.environ.get(AGENT_TOKEN_ENV):
+            self.auth_header = f"Bearer {os.environ[AGENT_TOKEN_ENV]}"
 
     def request(self, method: str, path: str, payload: Any | None = None) -> Any:
         data = None

@@ -134,7 +134,11 @@ async def app_auth(request: Request, call_next: Any) -> Any:
     if config is None:
         return await call_next(request)
 
-    if not (_valid_basic_auth(request.headers.get("Authorization"), config) or _valid_session(request, config) is not None):
+    if not (
+        _valid_basic_auth(request.headers.get("Authorization"), config)
+        or _valid_agent_token(request.headers.get("Authorization"))
+        or _valid_session(request, config) is not None
+    ):
         return _auth_unauthorized()
 
     return await call_next(request)
@@ -149,6 +153,10 @@ class AuthStatusOut(BaseModel):
     auth_required: bool
     authenticated: bool
     expires_at: int | None = None
+
+
+class AgentTokenCreateIn(BaseModel):
+    label: str = "Hermes JobFlow agents"
 
 
 @app.get("/health")
@@ -199,6 +207,23 @@ def auth_logout() -> JSONResponse:
     response = JSONResponse(AuthStatusOut(auth_required=config is not None, authenticated=False).model_dump())
     response.delete_cookie(AUTH_COOKIE_NAME, path="/", secure=_cookie_secure(), samesite="strict")
     return response
+
+
+@app.post("/api/agent-tokens")
+def create_agent_token(payload: AgentTokenCreateIn) -> dict[str, str]:
+    token = secrets.token_urlsafe(32)
+    now = utc_now()
+    with connect() as db:
+        db.execute(
+            "INSERT INTO agent_tokens(id, label, token_hash, created_at) VALUES (?, ?, ?, ?)",
+            (
+                str(uuid.uuid4()),
+                payload.label.strip()[:120] or "Hermes JobFlow agents",
+                hashlib.sha256(token.encode()).hexdigest(),
+                now,
+            ),
+        )
+    return {"token": token, "created_at": now}
 
 
 @app.get("/api/jobs", response_model=list[JobListItem])
@@ -2184,6 +2209,24 @@ def _valid_basic_auth(header: str | None, config: tuple[str, str]) -> bool:
         return False
     username, password = credentials
     return _credentials_match(username, password, config)
+
+
+def _valid_agent_token(header: str | None) -> bool:
+    if not header or not header.startswith("Bearer "):
+        return False
+    token = header[7:].strip()
+    if len(token) < 32:
+        return False
+    digest = hashlib.sha256(token.encode()).hexdigest()
+    with connect() as db:
+        row = db.execute(
+            "SELECT id FROM agent_tokens WHERE token_hash = ? AND revoked_at IS NULL",
+            (digest,),
+        ).fetchone()
+        if row is None:
+            return False
+        db.execute("UPDATE agent_tokens SET last_used_at = ? WHERE id = ?", (utc_now(), row["id"]))
+    return True
 
 
 def _credentials_match(username: str, password: str, config: tuple[str, str]) -> bool:
