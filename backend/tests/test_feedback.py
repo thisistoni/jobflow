@@ -209,13 +209,28 @@ def test_request_changes_invalidates_pack_and_regeneration_returns_to_inbox(
         return True
 
     monkeypatch.setattr(main, "_prepare_application_pack", fake_prepare)
+    rejected_opening = client.post(
+        "/api/jobs/job-1/agent-pack",
+        json={
+            "resume_headline": "Junior Software Developer | Python & interne Webanwendungen",
+            "resume_summary_html": "<p>Junior IT-Support-Techniker mit Informatikausbildung und praktischer Erfahrung in Python, internen Anwendungen und Automatisierung.</p>",
+            "letter_subject": "Bewerbung als Junior Software Entwickler",
+            "letter_body": ("Sehr geehrte Damen und Herren, ich bewerbe mich als Junior Software Entwickler. Die Position verbindet Python und interne Webanwendungen. " * 8),
+            "agent_model": "openai/gpt-5.6-luna",
+            "agent_run_id": "cron-run-rejected",
+            "critic_notes": "All claims checked against candidate evidence; language and specificity passed.",
+        },
+    )
+    assert rejected_opening.status_code == 422
+    assert "lead with verified candidate evidence" in rejected_opening.json()["detail"]
+
     regenerated = client.post(
         "/api/jobs/job-1/agent-pack",
         json={
             "resume_headline": "Junior Software Developer | Python & interne Webanwendungen",
             "resume_summary_html": "<p>Junior IT-Support-Techniker mit Informatikausbildung und praktischer Erfahrung in Python, internen Anwendungen und Automatisierung.</p>",
             "letter_subject": "Bewerbung als Junior Software Entwickler",
-            "letter_body": ("Sehr geehrte Damen und Herren, Ihre Position verbindet Python und interne Webanwendungen. " * 8),
+            "letter_body": ("Sehr geehrte Damen und Herren, praktische Erfahrung mit Python und internen Webanwendungen bringe ich aus eigenen umgesetzten Projekten mit. " * 8),
             "agent_model": "openai/gpt-5.6-luna",
             "agent_run_id": "cron-run-123",
             "critic_notes": "All claims checked against candidate evidence; language and specificity passed.",

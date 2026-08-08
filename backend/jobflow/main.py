@@ -572,8 +572,38 @@ def submit_feedback(job_id: str, payload: FeedbackIn) -> FeedbackOut:
     return FeedbackOut(rating=payload.rating, reasons=payload.reasons, note=payload.note.strip(), updated_at=now)
 
 
+_REJECTED_AGENT_LETTER_OPENING = re.compile(
+    r"\b(?:hiermit\s+bewerbe\s+ich\s+mich|ich\s+bewerbe\s+mich|ich\s+möchte\s+mich\s+bewerben|"
+    r"ihre\s+stellenanzeige|die\s+ausgeschriebene\s+position|sie\s+suchen|"
+    r"die\s+position\s+verbindet|in\s+dieser\s+rolle|die\s+aufgabe\s+umfasst)\b",
+    re.IGNORECASE,
+)
+
+
+def _agent_letter_opening(body: str) -> str:
+    paragraphs = [part.strip() for part in re.split(r"\n\s*\n", body) if part.strip()]
+    if not paragraphs:
+        return ""
+    opening = paragraphs[0]
+    if opening.casefold().startswith("sehr geehrt"):
+        if len(paragraphs) > 1:
+            opening = paragraphs[1]
+        elif "," in opening:
+            opening = opening.split(",", 1)[1].strip()
+    return opening
+
+
 @app.post("/api/jobs/{job_id}/agent-pack", response_model=JobDetail)
 def create_agent_pack(job_id: str, payload: AgentPackIn) -> JobDetail:
+    opening = _agent_letter_opening(payload.letter_body)
+    if _REJECTED_AGENT_LETTER_OPENING.search(opening):
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                "Application letter opening must lead with verified candidate evidence; "
+                "do not announce the application or explain the vacancy back to the employer."
+            ),
+        )
     with connect() as db:
         row = db.execute(
             """
