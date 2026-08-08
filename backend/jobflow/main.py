@@ -658,6 +658,10 @@ def regenerate_pack(job_id: str, payload: RegeneratePackIn) -> JobDetail:
             (encode_json(feedback_reasons), feedback_note, now, job_id),
         )
         db.execute(
+            "UPDATE jobs SET status = 'maybe', updated_at = ? WHERE id = ?",
+            (now, job_id),
+        )
+        db.execute(
             """
             INSERT INTO activity (id, kind, title, body, job_id, created_at)
             VALUES (?, 'package', ?, ?, ?, ?)

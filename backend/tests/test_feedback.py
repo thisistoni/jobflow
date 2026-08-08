@@ -170,6 +170,9 @@ def test_request_changes_invalidates_pack_and_regeneration_returns_to_inbox(
     assert len(still_pending["extracted_description"]) >= 180
     assert still_pending["requirements"] == ["Python", "SQL"]
 
+    with connect(db_path) as db:
+        db.execute("UPDATE jobs SET status = 'inbox' WHERE id = 'job-1'")
+
     queued = client.post("/api/jobs/job-1/regenerate-pack", json={})
     assert queued.status_code == 200
     queued_body = queued.json()
