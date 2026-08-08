@@ -315,7 +315,13 @@ function App() {
 
   React.useEffect(() => {
     if (!isUnlocked) return;
-    api<DashboardPulse>("/api/dashboard/pulse?days=20").then(setPulse).catch((reason: unknown) => {
+    Promise.all([
+      api<DashboardPulse>("/api/dashboard/pulse?days=20"),
+      api<DiscoveryOperations>("/api/discovery/operations")
+    ]).then(([nextPulse, operations]) => {
+      setPulse(nextPulse);
+      setDiscoveryOperations(operations);
+    }).catch((reason: unknown) => {
       if (!handleAuthExpired(reason)) setError(messageFrom(reason));
     });
   }, [handleAuthExpired, isUnlocked]);
@@ -371,6 +377,9 @@ function App() {
         if (!handleAuthExpired(reason)) setError(messageFrom(reason));
       });
       void api<DashboardPulse>("/api/dashboard/pulse?days=20").then(setPulse).catch((reason: unknown) => {
+        if (!handleAuthExpired(reason)) setError(messageFrom(reason));
+      });
+      void api<DiscoveryOperations>("/api/discovery/operations").then(setDiscoveryOperations).catch((reason: unknown) => {
         if (!handleAuthExpired(reason)) setError(messageFrom(reason));
       });
       if (view === "activity") {
