@@ -224,6 +224,44 @@ def test_request_changes_invalidates_pack_and_regeneration_returns_to_inbox(
     assert rejected_opening.status_code == 422
     assert "lead with verified candidate evidence" in rejected_opening.json()["detail"]
 
+    recruiting_metadata = client.post(
+        "/api/jobs/job-1/agent-pack",
+        json={
+            "resume_headline": "Softwareentwickler | interne Anwendungen und Automatisierung",
+            "resume_summary_html": "<p>Informatikausbildung und praktische Erfahrung mit internen Anwendungen und Automatisierung.</p>",
+            "letter_subject": "Bewerbung als Softwareentwickler",
+            "letter_body": (
+                "Sehr geehrte Damen und Herren,\n\n"
+                + "Praktische Erfahrung mit Python und internen Anwendungen bringe ich aus umgesetzten Projekten bei Example GmbH mit. "
+                + "Für die Aufgabe als (Junior) Software Engineer (m/w/d) passt diese Arbeitsweise. " * 7
+            ),
+            "agent_model": "openai/gpt-5.6-luna",
+            "agent_run_id": "cron-run-recruiting-metadata",
+            "critic_notes": "Claims checked.",
+        },
+    )
+    assert recruiting_metadata.status_code == 422
+    assert "recruiting metadata" in recruiting_metadata.json()["detail"]
+
+    advertised_stack_learning = client.post(
+        "/api/jobs/job-1/agent-pack",
+        json={
+            "resume_headline": "Softwareentwickler | interne Anwendungen und Automatisierung",
+            "resume_summary_html": "<p>Informatikausbildung und praktische Erfahrung mit internen Anwendungen und Automatisierung.</p>",
+            "letter_subject": "Bewerbung als Softwareentwickler",
+            "letter_body": (
+                "Sehr geehrte Damen und Herren,\n\n"
+                + "Praktische Erfahrung mit Python und internen Anwendungen bringe ich aus umgesetzten Projekten bei Example GmbH mit. "
+                + "Die konkreten Java- und SQL-Technologien Ihres Teams möchte ich systematisch vertiefen. " * 7
+            ),
+            "agent_model": "openai/gpt-5.6-luna",
+            "agent_run_id": "cron-run-stack-learning",
+            "critic_notes": "Claims checked.",
+        },
+    )
+    assert advertised_stack_learning.status_code == 422
+    assert "candidate evidence" in advertised_stack_learning.json()["detail"]
+
     regenerated = client.post(
         "/api/jobs/job-1/agent-pack",
         json={

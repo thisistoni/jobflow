@@ -578,6 +578,19 @@ _REJECTED_AGENT_LETTER_OPENING = re.compile(
     r"die\s+position\s+verbindet|in\s+dieser\s+rolle|die\s+aufgabe\s+umfasst)\b",
     re.IGNORECASE,
 )
+_RECRUITING_METADATA_IN_BODY = re.compile(
+    r"\((?:junior|m\s*/\s*w\s*/\s*d|w\s*/\s*m\s*/\s*x|f\s*/\s*m\s*/\s*d|all\s+genders)\)",
+    re.IGNORECASE,
+)
+_ADVERTISED_TECH_LEARNING = re.compile(
+    r"\b(?:technologien|tech[- ]?stack|java|sql|javascript|typescript)\b[^.!?]{0,180}"
+    r"\b(?:vertiefen|erlernen|ausbauen)\b",
+    re.IGNORECASE,
+)
+_INFORMAL_LETTER_SIGNOFF = re.compile(
+    r"mit\s+freundlichen\s+grüßen\s*\n+\s*toni\s*$",
+    re.IGNORECASE,
+)
 
 
 def _agent_letter_opening(body: str) -> str:
@@ -616,6 +629,21 @@ def create_agent_pack(job_id: str, payload: AgentPackIn) -> JobDetail:
         ).fetchone()
     if row is None:
         raise HTTPException(status_code=404, detail="Job not found")
+    if _RECRUITING_METADATA_IN_BODY.search(payload.letter_body):
+        raise HTTPException(
+            status_code=422,
+            detail="Application letter body must not repeat recruiting metadata such as (Junior) or gender markers.",
+        )
+    if _ADVERTISED_TECH_LEARNING.search(payload.letter_body):
+        raise HTTPException(
+            status_code=422,
+            detail="Application letter must present candidate evidence instead of promising to learn the advertised stack.",
+        )
+    if _INFORMAL_LETTER_SIGNOFF.search(payload.letter_body):
+        raise HTTPException(
+            status_code=422,
+            detail="Application letter must use Antonio Beslic rather than the informal name Toni in the sign-off.",
+        )
     draft = ApplicationDraft(
         resume_headline=payload.resume_headline,
         resume_summary_html=payload.resume_summary_html,

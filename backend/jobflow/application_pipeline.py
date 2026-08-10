@@ -219,8 +219,8 @@ def application_draft_quality_issues(job: KarriereJobDetail, draft: ApplicationD
     body = " ".join(draft.body.split())
     normalized_body = _normalize_prose(body)
     issues: list[str] = []
-    if job.title not in draft.body or job.company not in draft.body:
-        issues.append("Role or company is missing from the letter")
+    if job.company not in draft.body:
+        issues.append("Company is missing from the letter")
     if "SEW-EURODRIVE" not in draft.body:
         issues.append("No concrete current-work evidence")
     banned = (
