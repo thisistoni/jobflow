@@ -64,6 +64,25 @@ def test_role_title_controls_the_angle_instead_of_employer_domain_keywords() -> 
     assert "Finanzbereich" not in draft.body
 
 
+def test_company_source_metadata_is_not_required_in_letter_prose() -> None:
+    job = detail(
+        "Artificial Intelligence Specialist",
+        "Manpower Österreich (Kunde nicht genannt)",
+        "Practical experience with artificial intelligence",
+        "Build useful internal automation",
+    )
+    draft = draft_for(job)
+    draft.body = draft.body.replace(
+        "Manpower Österreich (Kunde nicht genannt)",
+        "Manpower Österreich",
+    )
+
+    assert application_draft_quality_issues(job, draft) == []
+
+    draft.body = draft.body.replace("Manpower Österreich", "der Personalberatung")
+    assert "Company is missing from the letter" in application_draft_quality_issues(job, draft)
+
+
 def test_materially_different_roles_do_not_receive_the_same_application() -> None:
     finance = draft_for(detail(
         "Finance AI & Process Automation Engineer (f/m/d)",

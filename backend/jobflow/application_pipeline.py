@@ -219,7 +219,13 @@ def application_draft_quality_issues(job: KarriereJobDetail, draft: ApplicationD
     body = " ".join(draft.body.split())
     normalized_body = _normalize_prose(body)
     issues: list[str] = []
-    if job.company not in draft.body:
+    # Source records may append acquisition metadata to the employer label,
+    # for example "Manpower Österreich (Kunde nicht genannt)". Requiring that
+    # raw value in recruiter-facing prose creates the same vacancy-metadata
+    # leakage that raw job-title matching caused previously.
+    company_label = re.sub(r"\s*\([^)]*\)\s*", " ", job.company).strip()
+    company_label = " ".join(company_label.split()) or job.company
+    if company_label.casefold() not in draft.body.casefold():
         issues.append("Company is missing from the letter")
     if "SEW-EURODRIVE" not in draft.body:
         issues.append("No concrete current-work evidence")
