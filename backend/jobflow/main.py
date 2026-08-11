@@ -746,6 +746,53 @@ def regenerate_pack(job_id: str, payload: RegeneratePackIn) -> JobDetail:
     return _job_detail(updated)
 
 
+@app.post("/api/jobs/{job_id}/cancel-pack-regeneration", response_model=JobDetail)
+def cancel_pack_regeneration(job_id: str) -> JobDetail:
+    now = utc_now()
+    with connect() as db:
+        pack = db.execute(
+            "SELECT revision_state FROM application_packs WHERE job_id = ?",
+            (job_id,),
+        ).fetchone()
+        if pack is None:
+            raise HTTPException(status_code=404, detail="Application pack not found")
+        if pack["revision_state"] != "changes_requested":
+            raise HTTPException(status_code=409, detail="No pack regeneration is queued")
+        db.execute(
+            """
+            UPDATE application_packs
+            SET revision_state = 'current', revision_reasons_json = '[]',
+                revision_note = '', error = NULL, updated_at = ?
+            WHERE job_id = ?
+            """,
+            (now, job_id),
+        )
+        db.execute(
+            "UPDATE jobs SET status = 'inbox', updated_at = ? WHERE id = ?",
+            (now, job_id),
+        )
+        db.execute(
+            """
+            INSERT INTO activity (id, kind, title, body, job_id, created_at)
+            VALUES (?, 'package', 'Cancelled AI regeneration',
+                    'The existing application pack remains current.', ?, ?)
+            """,
+            (str(uuid.uuid4()), job_id, now),
+        )
+        updated = db.execute(
+            """
+            SELECT j.*, f.rating, f.reasons_json, f.note, f.updated_at AS feedback_updated_at
+            FROM jobs j
+            LEFT JOIN feedback f ON f.job_id = j.id
+            WHERE j.id = ?
+            """,
+            (job_id,),
+        ).fetchone()
+    if updated is None:
+        raise HTTPException(status_code=404, detail="Job not found")
+    return _job_detail(updated)
+
+
 @app.get("/api/preferences", response_model=Preferences)
 def get_preferences() -> Preferences:
     with connect() as db:

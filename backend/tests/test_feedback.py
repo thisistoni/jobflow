@@ -180,6 +180,21 @@ def test_request_changes_invalidates_pack_and_regeneration_returns_to_inbox(
     assert queued_body["application_pack"]["revision_state"] == "changes_requested"
     assert queued_body["application_pack"]["error"] == "Queued for the Luna application agent."
 
+    cancelled = client.post("/api/jobs/job-1/cancel-pack-regeneration")
+    assert cancelled.status_code == 200
+    cancelled_body = cancelled.json()
+    assert cancelled_body["status"] == "inbox"
+    assert cancelled_body["application_pack"]["version"] == 1
+    assert cancelled_body["application_pack"]["revision_state"] == "current"
+    assert cancelled_body["application_pack"]["revision_reasons"] == []
+    assert cancelled_body["application_pack"]["revision_note"] == ""
+    assert cancelled_body["application_pack"]["error"] is None
+    assert client.post("/api/jobs/job-1/cancel-pack-regeneration").status_code == 409
+
+    requeued = client.post("/api/jobs/job-1/regenerate-pack", json={})
+    assert requeued.status_code == 200
+    assert requeued.json()["application_pack"]["revision_state"] == "changes_requested"
+
     def fake_prepare(job_id: str, *_args: Any, **kwargs: Any) -> bool:
         draft = kwargs["draft"]
         assert "Python" in draft.body
