@@ -83,6 +83,22 @@ def test_company_source_metadata_is_not_required_in_letter_prose() -> None:
     assert "Company is missing from the letter" in application_draft_quality_issues(job, draft)
 
 
+def test_application_draft_rejects_ai_terminology_inventory() -> None:
+    job = detail(
+        "Artificial Intelligence Specialist",
+        "Manpower Österreich",
+        "Practical experience with artificial intelligence",
+        "Build useful internal automation",
+    )
+    draft = draft_for(job)
+    draft.body += "\n\nIch nutze LLMs, generative AI, Agenten und Tool Calling."
+
+    assert (
+        "Application letter inventories AI terminology instead of making one recruiter argument"
+        in application_draft_quality_issues(job, draft)
+    )
+
+
 def test_materially_different_roles_do_not_receive_the_same_application() -> None:
     finance = draft_for(detail(
         "Finance AI & Process Automation Engineer (f/m/d)",

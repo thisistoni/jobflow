@@ -237,6 +237,14 @@ def application_draft_quality_issues(job: KarriereJobDetail, draft: ApplicationD
     )
     if any(phrase.casefold() in draft.body.casefold() for phrase in banned):
         issues.append("Template or mixed-language source fragment detected")
+    ai_inventory_terms = (
+        re.compile(r"\bLLMs?\b", re.IGNORECASE),
+        re.compile(r"\bgenerative(?:r|n|s|m)?\s+(?:AI|KI)\b", re.IGNORECASE),
+        re.compile(r"\bAgent(?:en|s|innen|:innen)?\b", re.IGNORECASE),
+        re.compile(r"\bTool[ -]?Calling\b", re.IGNORECASE),
+    )
+    if sum(bool(pattern.search(body)) for pattern in ai_inventory_terms) >= 3:
+        issues.append("Application letter inventories AI terminology instead of making one recruiter argument")
     for source_item in [*job.requirements, *job.responsibilities]:
         normalized_source = _normalize_prose(source_item)
         if len(normalized_source.split()) >= 8 and normalized_source in normalized_body:
