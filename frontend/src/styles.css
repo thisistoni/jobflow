@@ -2536,20 +2536,8 @@ button.activity-item:hover {
     width: 100%;
     height: 100%;
     min-height: 0;
-    background: var(--paper);
-  }
-
-  html {
     overflow: hidden;
-  }
-
-  html.is-standalone {
-    overflow: visible;
-  }
-
-  body,
-  #root {
-    overflow: visible;
+    background: var(--paper);
   }
 
   body {
@@ -2558,11 +2546,7 @@ button.activity-item:hover {
   }
 
   .app-shell {
-    --standalone-viewport-bottom-offset: 0px;
-    --mobile-dock-clearance: max(
-      74px,
-      calc(98px + max(24px, env(safe-area-inset-bottom)) - var(--standalone-viewport-bottom-offset))
-    );
+    --mobile-dock-clearance: calc(98px + max(24px, env(safe-area-inset-bottom)));
     position: fixed;
     inset: 0;
     height: auto;
@@ -2573,8 +2557,7 @@ button.activity-item:hover {
   }
 
   html.is-standalone .app-shell {
-    --standalone-viewport-bottom-offset: env(safe-area-inset-top);
-    bottom: calc(0px - var(--standalone-viewport-bottom-offset));
+    --mobile-dock-clearance: 74px;
   }
 
   .desktop-rail {
@@ -2621,20 +2604,24 @@ button.activity-item:hover {
   }
 
   .review-body {
-    padding-bottom: max(
-      60px,
-      calc(86px + env(safe-area-inset-bottom) - var(--standalone-viewport-bottom-offset))
-    );
+    padding-bottom: calc(86px + env(safe-area-inset-bottom));
+  }
+
+  html.is-standalone .review-body {
+    padding-bottom: 60px;
   }
 
   .review-actions {
     position: fixed;
     inset: auto auto 0 50%;
-    bottom: calc(0px - var(--standalone-viewport-bottom-offset));
     z-index: 24;
     width: 100%;
     transform: translateX(-50%);
     padding-bottom: max(14px, env(safe-area-inset-bottom));
+  }
+
+  html.is-standalone .review-actions {
+    padding-bottom: 14px;
   }
 
   .inbox-pane .screen-nav-wrap,
@@ -2656,6 +2643,10 @@ button.activity-item:hover {
     pointer-events: none;
   }
 
+  html.is-standalone .mobile-dock {
+    padding-bottom: 0;
+  }
+
   .mobile-dock .screen-nav-wrap {
     display: block;
     padding: 0;
@@ -2672,11 +2663,12 @@ button.activity-item:hover {
 
   .preferences-screen .sticky-submit {
     position: sticky;
-    bottom: max(
-      74px,
-      calc(66px + max(24px, env(safe-area-inset-bottom)) - var(--standalone-viewport-bottom-offset))
-    );
+    bottom: calc(66px + max(24px, env(safe-area-inset-bottom)));
     z-index: 19;
+  }
+
+  html.is-standalone .preferences-screen .sticky-submit {
+    bottom: 74px;
   }
 
   .mobile-back {
