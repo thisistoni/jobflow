@@ -2538,8 +2538,16 @@ button.activity-item:hover {
     overflow: hidden;
   }
 
+  body {
+    position: fixed;
+    inset: 0;
+  }
+
   .app-shell {
-    height: 100dvh;
+    --mobile-dock-clearance: calc(98px + max(24px, env(safe-area-inset-bottom)));
+    position: fixed;
+    inset: 0;
+    height: auto;
     min-height: 0;
     overflow: hidden;
     padding-top: max(0px, env(safe-area-inset-top));
@@ -2615,7 +2623,8 @@ button.activity-item:hover {
     left: 50%;
     transform: translateX(-50%);
     margin: 0 auto;
-    padding: 0 16px max(24px, env(safe-area-inset-bottom));
+    padding: 12px 16px max(24px, env(safe-area-inset-bottom));
+    background: linear-gradient(to bottom, rgb(255 253 252 / 0), var(--paper) 12px);
     pointer-events: none;
   }
 
@@ -2630,7 +2639,7 @@ button.activity-item:hover {
   .pipeline-body,
   .activity-body,
   .preferences-body {
-    padding-bottom: 94px;
+    padding-bottom: var(--mobile-dock-clearance);
   }
 
   .preferences-screen .sticky-submit {
