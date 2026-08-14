@@ -2540,6 +2540,10 @@ button.activity-item:hover {
     background: var(--paper);
   }
 
+  html.is-standalone {
+    background: var(--ink);
+  }
+
   body {
     position: fixed;
     inset: 0;
@@ -2645,6 +2649,10 @@ button.activity-item:hover {
 
   html.is-standalone .mobile-dock {
     padding-bottom: 0;
+  }
+
+  html.is-standalone .mobile-dock .bottom-nav {
+    padding: 12px 6px 0;
   }
 
   .mobile-dock .screen-nav-wrap {
