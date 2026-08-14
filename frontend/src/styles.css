@@ -2536,6 +2536,7 @@ button.activity-item:hover {
     height: 100%;
     min-height: 0;
     overflow: hidden;
+    background: var(--paper);
   }
 
   body {
@@ -2551,6 +2552,7 @@ button.activity-item:hover {
     min-height: 0;
     overflow: hidden;
     padding-top: max(0px, env(safe-area-inset-top));
+    background: var(--warm);
   }
 
   .desktop-rail {
