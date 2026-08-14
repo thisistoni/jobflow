@@ -32,10 +32,6 @@ import {
 } from "lucide-react";
 import "./styles.css";
 
-const navigatorWithStandalone = navigator as Navigator & { standalone?: boolean };
-const standaloneMode = window.matchMedia("(display-mode: standalone)").matches || navigatorWithStandalone.standalone === true;
-document.documentElement.classList.toggle("is-standalone", standaloneMode);
-
 type Rating = "good" | "maybe" | "bad";
 type ReviewDecisionValue = "approve" | "decline" | "request_changes";
 type ApplicationTaskState = "not_started" | "prepared" | "needs_input" | "awaiting_final_confirmation" | "submitted" | "failed";

@@ -2540,28 +2540,13 @@ button.activity-item:hover {
     background: var(--paper);
   }
 
-  html.is-standalone {
-    background: var(--ink);
-  }
-
-  body {
-    position: fixed;
-    inset: 0;
-  }
-
   .app-shell {
-    --mobile-dock-clearance: calc(98px + max(24px, env(safe-area-inset-bottom)));
-    position: fixed;
-    inset: 0;
-    height: auto;
+    --mobile-dock-clearance: calc(64px + max(12px, env(safe-area-inset-bottom)));
+    height: 100dvh;
     min-height: 0;
     overflow: hidden;
     padding-top: max(0px, env(safe-area-inset-top));
     background: var(--warm);
-  }
-
-  html.is-standalone .app-shell {
-    --mobile-dock-clearance: 74px;
   }
 
   .desktop-rail {
@@ -2611,10 +2596,6 @@ button.activity-item:hover {
     padding-bottom: calc(86px + env(safe-area-inset-bottom));
   }
 
-  html.is-standalone .review-body {
-    padding-bottom: 60px;
-  }
-
   .review-actions {
     position: fixed;
     inset: auto auto 0 50%;
@@ -2624,17 +2605,13 @@ button.activity-item:hover {
     padding-bottom: max(14px, env(safe-area-inset-bottom));
   }
 
-  html.is-standalone .review-actions {
-    padding-bottom: 14px;
-  }
-
   .inbox-pane .screen-nav-wrap,
   .detail-pane .screen-nav-wrap {
     display: none;
   }
 
   .mobile-dock {
-    position: absolute;
+    position: fixed;
     inset: auto 0 0;
     z-index: 20;
     display: block;
@@ -2642,17 +2619,9 @@ button.activity-item:hover {
     left: 50%;
     transform: translateX(-50%);
     margin: 0 auto;
-    padding: 12px 16px max(24px, env(safe-area-inset-bottom));
-    background: linear-gradient(to bottom, rgb(255 253 252 / 0), var(--paper) 12px);
+    padding: 6px 16px max(12px, env(safe-area-inset-bottom));
+    background: var(--ink);
     pointer-events: none;
-  }
-
-  html.is-standalone .mobile-dock {
-    padding-bottom: 0;
-  }
-
-  html.is-standalone .mobile-dock .bottom-nav {
-    padding: 12px 6px 0;
   }
 
   .mobile-dock .screen-nav-wrap {
@@ -2671,12 +2640,8 @@ button.activity-item:hover {
 
   .preferences-screen .sticky-submit {
     position: sticky;
-    bottom: calc(66px + max(24px, env(safe-area-inset-bottom)));
+    bottom: calc(66px + max(12px, env(safe-area-inset-bottom)));
     z-index: 19;
-  }
-
-  html.is-standalone .preferences-screen .sticky-submit {
-    bottom: 74px;
   }
 
   .mobile-back {
