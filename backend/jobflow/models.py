@@ -7,6 +7,15 @@ from pydantic import BaseModel, Field, SecretStr, field_validator, model_validat
 
 Rating = Literal["good", "maybe", "bad"]
 JobStatus = Literal["inbox", "good", "maybe", "bad"]
+ReviewDecision = Literal["approve", "decline", "request_changes"]
+ApplicationTaskState = Literal[
+    "not_started",
+    "prepared",
+    "needs_input",
+    "awaiting_final_confirmation",
+    "submitted",
+    "failed",
+]
 
 
 class FeedbackOut(BaseModel):
@@ -51,6 +60,27 @@ class ApplicationPackOut(BaseModel):
     versions: list[ApplicationPackVersionOut] = Field(default_factory=list)
 
 
+class ReviewDecisionOut(BaseModel):
+    job_id: str
+    pack_version: int
+    decision: ReviewDecision
+    reasons: list[str] = Field(default_factory=list)
+    note: str = ""
+    updated_at: str
+
+
+class ApplicationTaskOut(BaseModel):
+    id: str
+    job_id: str
+    pack_version: int
+    state: ApplicationTaskState
+    required_fields: list[str] = Field(default_factory=list)
+    questions: list[str] = Field(default_factory=list)
+    report: str = ""
+    created_at: str
+    updated_at: str
+
+
 class JobListItem(BaseModel):
     id: str
     title: str
@@ -67,6 +97,7 @@ class JobListItem(BaseModel):
     first_seen_at: str
     source_url: str
     feedback: FeedbackOut | None = None
+    review_decision: ReviewDecisionOut | None = None
     pack_status: Literal["preparing", "ready", "failed"] | None = None
     pack_revision_state: Literal["current", "changes_requested", "regenerated"] | None = None
 
@@ -96,6 +127,7 @@ class JobDetail(JobListItem):
     updated_at: str
     reviewed_at: str | None = None
     application_pack: ApplicationPackOut | None = None
+    application_task: ApplicationTaskOut | None = None
 
 
 class FeedbackIn(BaseModel):
@@ -109,6 +141,19 @@ class RegeneratePackIn(BaseModel):
     note: str = Field(default="", max_length=1200)
 
 
+class ReviewDecisionIn(BaseModel):
+    decision: ReviewDecision
+    reasons: list[str] = Field(default_factory=list, max_length=8)
+    note: str = Field(default="", max_length=1200)
+
+
+class ReviewStatusOut(BaseModel):
+    backlog_count: int = Field(ge=0)
+    threshold: int = Field(ge=1)
+    paused_for_review: bool
+    paused_reason: str | None = None
+
+
 class AgentPackIn(BaseModel):
     resume_headline: str = Field(min_length=8, max_length=180)
     resume_summary_html: str = Field(min_length=80, max_length=2400)
@@ -119,6 +164,29 @@ class AgentPackIn(BaseModel):
     critic_notes: str = Field(min_length=10, max_length=2400)
     revision_reasons: list[str] = Field(default_factory=list, max_length=8)
     revision_note: str = Field(default="", max_length=1200)
+
+
+class AgentApplicationReportIn(BaseModel):
+    state: ApplicationTaskState = "prepared"
+    required_fields: list[str] = Field(default_factory=list, max_length=50)
+    questions: list[str] = Field(default_factory=list, max_length=50)
+    report: str = Field(default="", max_length=5000)
+
+
+class PushSubscriptionIn(BaseModel):
+    subscription: dict[str, object] = Field(default_factory=dict)
+
+
+class PushStatusOut(BaseModel):
+    supported: bool = True
+    public_key: str
+    subscribed: bool = False
+    subscription_count: int = Field(default=0, ge=0)
+
+
+class TestNotificationOut(BaseModel):
+    sent: int = Field(ge=0)
+    failed: int = Field(ge=0)
 
 
 class JobIngestIn(BaseModel):
@@ -252,6 +320,8 @@ class DiscoveryRunOut(BaseModel):
     jobs_added: int = 0
     jobs_evaluated: int = 0
     packs_prepared: int = 0
+    paused_for_review: bool = False
+    paused_reason: str | None = None
 
 
 class DiscoverySourceConfig(BaseModel):
@@ -306,6 +376,8 @@ class DiscoveryRunSummary(BaseModel):
     jobs_evaluated: int = 0
     packs_prepared: int = 0
     error: str | None = None
+    paused_for_review: bool = False
+    paused_reason: str | None = None
 
 
 class DiscoveryOperationsOut(BaseModel):
@@ -315,6 +387,7 @@ class DiscoveryOperationsOut(BaseModel):
     sources: list[DiscoverySourceConfig]
     generated_queries: list[str]
     next_run_at: str | None = None
+    review: ReviewStatusOut
     last_run: DiscoveryRunSummary | None = None
     recent_runs: list[DiscoveryRunSummary] = Field(default_factory=list)
 

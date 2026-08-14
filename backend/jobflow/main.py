@@ -15,14 +15,19 @@ from contextlib import asynccontextmanager, suppress
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Literal
+from urllib.error import URLError
 from urllib.parse import urlsplit
+from urllib.request import Request as UrlRequest, urlopen
 from zoneinfo import ZoneInfo
 
+from cryptography.hazmat.primitives import serialization
+from cryptography.hazmat.primitives.asymmetric import ec
 from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
+from pywebpush import WebPushException, webpush
 
 from .application_pipeline import ApplicationDraft, analyze_karriere_job, application_draft_quality_issues
 from .agentmail import (
@@ -32,7 +37,7 @@ from .agentmail import (
     fetch_karriere_alerts,
     karriere_alerts_active,
 )
-from .database import connect, decode_json, encode_json, init_db, utc_now
+from .database import connect, database_path, decode_json, encode_json, init_db, utc_now
 from .firecrawl import FirecrawlConfigError, FirecrawlProviderError, scrape_url, search_web
 from .importer import _stable_id, canonicalize_url
 from .karriere_camofox import (
@@ -47,7 +52,9 @@ from .karriere_camofox import (
 from .letter_pdf import render_application_letter_pdf
 from .models import (
     ActivityItem,
+    AgentApplicationReportIn,
     AgentPackIn,
+    ApplicationTaskOut,
     ApplicationPackOut,
     ApplicationPackVersionOut,
     DailyPulseItem,
@@ -71,12 +78,18 @@ from .models import (
     JobIngestIn,
     JobListItem,
     Preferences,
+    PushStatusOut,
+    PushSubscriptionIn,
     RegeneratePackIn,
     ReactiveResumeConnectIn,
     ReactiveResumeOption,
     ReactiveResumeReference,
     ReactiveResumeReferenceIn,
     ReactiveResumeStatus,
+    ReviewDecisionIn,
+    ReviewDecisionOut,
+    ReviewStatusOut,
+    TestNotificationOut,
 )
 from .reactive_resume import (
     DEFAULT_BASE_URL as REACTIVE_RESUME_DEFAULT_BASE_URL,
@@ -96,6 +109,8 @@ AUTH_COOKIE_SECURE_ENV = "JOBFLOW_AUTH_COOKIE_SECURE"
 AUTH_COOKIE_NAME = "jobflow_session"
 AUTH_COOKIE_MAX_AGE_SECONDS = 7 * 24 * 60 * 60
 STATIC_DIR_ENV = "JOBFLOW_STATIC_DIR"
+REVISION_WEBHOOK_URL_ENV = "JOBFLOW_REVISION_WEBHOOK_URL"
+REVISION_WEBHOOK_SECRET_ENV = "JOBFLOW_REVISION_WEBHOOK_SECRET"
 OPEN_AUTH_API_PATHS = {"/api/auth/status", "/api/auth/login", "/api/auth/logout"}
 _scheduler_heartbeat_at: datetime | None = None
 
@@ -224,6 +239,75 @@ def create_agent_token(payload: AgentTokenCreateIn) -> dict[str, str]:
             ),
         )
     return {"token": token, "created_at": now}
+
+
+@app.get("/api/notifications/status", response_model=PushStatusOut)
+def notification_status() -> PushStatusOut:
+    public_key = _vapid_public_key()
+    with connect() as db:
+        count = db.execute(
+            "SELECT COUNT(*) FROM push_subscriptions WHERE disabled_at IS NULL"
+        ).fetchone()[0]
+    return PushStatusOut(public_key=public_key, subscribed=count > 0, subscription_count=count)
+
+
+@app.post("/api/notifications/subscribe", response_model=PushStatusOut)
+def subscribe_notifications(payload: PushSubscriptionIn, request: Request) -> PushStatusOut:
+    endpoint = _subscription_endpoint(payload.subscription)
+    now = utc_now()
+    with connect() as db:
+        existing = db.execute(
+            "SELECT id, created_at FROM push_subscriptions WHERE endpoint = ?",
+            (endpoint,),
+        ).fetchone()
+        subscription_id = existing["id"] if existing else str(uuid.uuid4())
+        created_at = existing["created_at"] if existing else now
+        db.execute(
+            """
+            INSERT INTO push_subscriptions (
+                id, endpoint, subscription_json, user_agent, created_at, updated_at, last_error, disabled_at
+            ) VALUES (?, ?, ?, ?, ?, ?, NULL, NULL)
+            ON CONFLICT(endpoint) DO UPDATE SET
+                subscription_json = excluded.subscription_json,
+                user_agent = excluded.user_agent,
+                updated_at = excluded.updated_at,
+                last_error = NULL,
+                disabled_at = NULL
+            """,
+            (
+                subscription_id,
+                endpoint,
+                encode_json(payload.subscription),
+                (request.headers.get("User-Agent") or "")[:300],
+                created_at,
+                now,
+            ),
+        )
+    return notification_status()
+
+
+@app.post("/api/notifications/unsubscribe", response_model=PushStatusOut)
+def unsubscribe_notifications(payload: PushSubscriptionIn) -> PushStatusOut:
+    endpoint = _subscription_endpoint(payload.subscription)
+    with connect() as db:
+        db.execute(
+            "UPDATE push_subscriptions SET disabled_at = ?, updated_at = ? WHERE endpoint = ?",
+            (utc_now(), utc_now(), endpoint),
+        )
+    return notification_status()
+
+
+@app.post("/api/notifications/test", response_model=TestNotificationOut)
+def test_notification() -> TestNotificationOut:
+    sent, failed = _send_notification_to_all(
+        {
+            "title": "JobFlow notifications are enabled",
+            "body": "You will be notified when review or application tasks need attention.",
+            "url": "/",
+            "tag": "jobflow-test",
+        }
+    )
+    return TestNotificationOut(sent=sent, failed=failed)
 
 
 @app.get("/api/jobs", response_model=list[JobListItem])
@@ -496,14 +580,189 @@ def update_job_analysis(job_id: str, payload: JobAnalysisIn) -> JobDetail:
 
 @app.post("/api/jobs/{job_id}/feedback", response_model=FeedbackOut)
 def submit_feedback(job_id: str, payload: FeedbackIn) -> FeedbackOut:
+    with connect() as db:
+        pack = db.execute(
+            "SELECT status FROM application_packs WHERE job_id = ?",
+            (job_id,),
+        ).fetchone()
+    if pack is None or pack["status"] != "ready":
+        return _store_legacy_feedback_only(job_id, payload)
+    decision_map = {"good": "approve", "maybe": "request_changes", "bad": "decline"}
+    detail = _apply_review_decision(
+        job_id,
+        ReviewDecisionIn(decision=decision_map[payload.rating], reasons=payload.reasons, note=payload.note),
+        legacy_rating=payload.rating,
+    )
+    if detail.feedback is None:
+        raise HTTPException(status_code=500, detail="Feedback was not saved")
+    return detail.feedback
+
+
+@app.get("/api/review/status", response_model=ReviewStatusOut)
+def review_status() -> ReviewStatusOut:
+    return _review_status()
+
+
+@app.post("/api/jobs/{job_id}/review-decision", response_model=JobDetail)
+def submit_review_decision(job_id: str, payload: ReviewDecisionIn) -> JobDetail:
+    return _apply_review_decision(job_id, payload)
+
+
+@app.post("/api/jobs/{job_id}/application-task/report", response_model=JobDetail)
+def report_application_task(job_id: str, payload: AgentApplicationReportIn, request: Request) -> JobDetail:
+    _require_agent_auth(request)
+    if payload.state == "submitted":
+        raise HTTPException(
+            status_code=409,
+            detail="A progress report cannot authorize or record final submission",
+        )
     now = utc_now()
     with connect() as db:
         job = db.execute("SELECT title, company FROM jobs WHERE id = ?", (job_id,)).fetchone()
         if job is None:
             raise HTTPException(status_code=404, detail="Job not found")
-        existing = db.execute("SELECT id, created_at FROM feedback WHERE job_id = ?", (job_id,)).fetchone()
-        feedback_id = existing["id"] if existing else str(uuid.uuid4())
+        pack = db.execute("SELECT version FROM application_packs WHERE job_id = ?", (job_id,)).fetchone()
+        if pack is None:
+            raise HTTPException(status_code=409, detail="Application task requires an application pack")
+        decision = db.execute(
+            "SELECT decision FROM review_decisions WHERE job_id = ? AND pack_version = ?",
+            (job_id, pack["version"]),
+        ).fetchone()
+        if decision is None or decision["decision"] != "approve":
+            raise HTTPException(
+                status_code=409,
+                detail="Application preparation requires explicit approval of the current pack version",
+            )
+        existing = db.execute(
+            "SELECT id, created_at FROM application_tasks WHERE job_id = ? AND pack_version = ?",
+            (job_id, pack["version"]),
+        ).fetchone()
+        if existing is None:
+            raise HTTPException(status_code=409, detail="Approved application task was not created")
+        task_id = existing["id"] if existing else str(uuid.uuid4())
         created_at = existing["created_at"] if existing else now
+        db.execute(
+            """
+            INSERT INTO application_tasks (
+                id, job_id, pack_version, state, required_fields_json,
+                questions_json, report, created_at, updated_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(job_id, pack_version) DO UPDATE SET
+                state = excluded.state,
+                required_fields_json = excluded.required_fields_json,
+                questions_json = excluded.questions_json,
+                report = excluded.report,
+                updated_at = excluded.updated_at
+            """,
+            (
+                task_id,
+                job_id,
+                pack["version"],
+                payload.state,
+                encode_json(_clean_list(payload.required_fields)),
+                encode_json(_clean_list(payload.questions)),
+                payload.report.strip(),
+                created_at,
+                now,
+            ),
+        )
+        db.execute(
+            "UPDATE jobs SET updated_at = ? WHERE id = ?",
+            (now, job_id),
+        )
+        db.execute(
+            "INSERT INTO activity (id, kind, title, body, job_id, created_at) VALUES (?, 'application_task', ?, ?, ?, ?)",
+            (
+                str(uuid.uuid4()),
+                f"Application task updated for {job['company']}",
+                f"{job['title']} · {payload.state.replace('_', ' ')}",
+                job_id,
+                now,
+            ),
+        )
+        row = db.execute(
+            """
+            SELECT j.*, f.rating, f.reasons_json, f.note, f.updated_at AS feedback_updated_at
+            FROM jobs j
+            LEFT JOIN feedback f ON f.job_id = j.id
+            WHERE j.id = ?
+            """,
+            (job_id,),
+        ).fetchone()
+    if payload.state in {"needs_input", "failed"}:
+        _notify_application_task(job_id, payload.state)
+    if row is None:
+        raise HTTPException(status_code=404, detail="Job not found")
+    return _job_detail(row)
+
+
+def _apply_review_decision(
+    job_id: str,
+    payload: ReviewDecisionIn,
+    *,
+    legacy_rating: Literal["good", "maybe", "bad"] | None = None,
+) -> JobDetail:
+    now = utc_now()
+    revision_request_id: str | None = None
+    reasons = _clean_list(payload.reasons)[:8]
+    note = payload.note.strip()
+    with connect() as db:
+        row = db.execute(
+            """
+            SELECT j.*, f.rating, f.reasons_json, f.note, f.updated_at AS feedback_updated_at
+            FROM jobs j
+            LEFT JOIN feedback f ON f.job_id = j.id
+            WHERE j.id = ?
+            """,
+            (job_id,),
+        ).fetchone()
+        if row is None:
+            raise HTTPException(status_code=404, detail="Job not found")
+        pack = db.execute(
+            "SELECT * FROM application_packs WHERE job_id = ?",
+            (job_id,),
+        ).fetchone()
+        if pack is None or pack["status"] != "ready":
+            raise HTTPException(status_code=409, detail="A ready application pack is required before review")
+
+        existing_decision = db.execute(
+            "SELECT id, created_at FROM review_decisions WHERE job_id = ? AND pack_version = ?",
+            (job_id, pack["version"]),
+        ).fetchone()
+        decision_id = existing_decision["id"] if existing_decision else str(uuid.uuid4())
+        decision_created_at = existing_decision["created_at"] if existing_decision else now
+        db.execute(
+            """
+            INSERT INTO review_decisions (
+                id, job_id, pack_version, decision, reasons_json, note, created_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(job_id, pack_version) DO UPDATE SET
+                decision = excluded.decision,
+                reasons_json = excluded.reasons_json,
+                note = excluded.note,
+                updated_at = excluded.updated_at
+            """,
+            (
+                decision_id,
+                job_id,
+                pack["version"],
+                payload.decision,
+                encode_json(reasons),
+                note,
+                decision_created_at,
+                now,
+            ),
+        )
+
+        rating = legacy_rating or {
+            "approve": "good",
+            "decline": "bad",
+            "request_changes": "maybe",
+        }[payload.decision]
+        existing_feedback = db.execute("SELECT id, created_at FROM feedback WHERE job_id = ?", (job_id,)).fetchone()
+        feedback_id = existing_feedback["id"] if existing_feedback else str(uuid.uuid4())
+        feedback_created_at = existing_feedback["created_at"] if existing_feedback else now
         db.execute(
             """
             INSERT INTO feedback (id, job_id, rating, reasons_json, note, created_at, updated_at)
@@ -514,29 +773,32 @@ def submit_feedback(job_id: str, payload: FeedbackIn) -> FeedbackOut:
                 note = excluded.note,
                 updated_at = excluded.updated_at
             """,
-            (
-                feedback_id,
-                job_id,
-                payload.rating,
-                encode_json(payload.reasons),
-                payload.note.strip(),
-                created_at,
-                now,
-            ),
+            (feedback_id, job_id, rating, encode_json(reasons), note, feedback_created_at, now),
         )
         db.execute(
             "UPDATE jobs SET status = ?, reviewed_at = ?, updated_at = ? WHERE id = ?",
-            (payload.rating, now, now, job_id),
+            (rating, now, now, job_id),
         )
-        if payload.rating == "maybe":
+
+        if payload.decision == "approve":
+            _upsert_application_task(db, job_id, int(pack["version"]), now)
+            activity_title = f"Approved pack for {row['company']}"
+            activity_body = f"{row['title']} · application preparation queued. No employer contact or final submission is authorized."
+        elif payload.decision == "request_changes":
+            db.execute(
+                "DELETE FROM application_tasks WHERE job_id = ? AND pack_version = ? AND state != 'submitted'",
+                (job_id, pack["version"]),
+            )
             db.execute(
                 """
                 INSERT OR IGNORE INTO application_pack_versions(
                     job_id, version, revision_state, revision_reasons_json, revision_note,
-                    resume_id, resume_name, resume_pdf_pages, letter_subject, letter_body, created_at
+                    resume_id, resume_name, resume_pdf_pages, letter_subject, letter_body,
+                    agent_model, agent_run_id, critic_notes, created_at
                 )
                 SELECT job_id, version, revision_state, revision_reasons_json, revision_note,
-                       resume_id, resume_name, resume_pdf_pages, letter_subject, letter_body, updated_at
+                       resume_id, resume_name, resume_pdf_pages, letter_subject, letter_body,
+                       agent_model, agent_run_id, critic_notes, updated_at
                 FROM application_packs
                 WHERE job_id = ? AND status = 'ready'
                 """,
@@ -549,13 +811,82 @@ def submit_feedback(job_id: str, payload: FeedbackIn) -> FeedbackOut:
                     revision_state = 'changes_requested',
                     revision_reasons_json = ?,
                     revision_note = ?,
-                    error = 'Changes requested; regenerate the pack to create a new ready version.',
+                    error = 'Queued for the Luna application agent.',
                     updated_at = ?
                 WHERE job_id = ?
                 """,
-                (encode_json(payload.reasons), payload.note.strip(), now, job_id),
+                (encode_json(reasons), note, now, job_id),
             )
-        reason_text = ", ".join(payload.reasons) if payload.reasons else "No quick reason"
+            revision_request_id = str(uuid.uuid4())
+            db.execute(
+                """
+                INSERT INTO revision_requests (
+                    id, job_id, pack_version, reasons_json, note, status, created_at
+                ) VALUES (?, ?, ?, ?, ?, 'queued', ?)
+                """,
+                (revision_request_id, job_id, pack["version"], encode_json(reasons), note, now),
+            )
+            activity_title = f"Queued AI revision for {row['company']}"
+            activity_body = "Feedback is saved for Luna to produce the next CV and letter version."
+        else:
+            db.execute(
+                "DELETE FROM application_tasks WHERE job_id = ? AND pack_version = ? AND state != 'submitted'",
+                (job_id, pack["version"]),
+            )
+            activity_title = f"Declined {row['company']}"
+            activity_body = f"{row['title']} · {', '.join(reasons) if reasons else 'No quick reason'}"
+
+        db.execute(
+            """
+            INSERT INTO activity (id, kind, title, body, job_id, created_at)
+            VALUES (?, 'review_decision', ?, ?, ?, ?)
+            """,
+            (str(uuid.uuid4()), activity_title, activity_body, job_id, now),
+        )
+        updated = db.execute(
+            """
+            SELECT j.*, f.rating, f.reasons_json, f.note, f.updated_at AS feedback_updated_at
+            FROM jobs j
+            LEFT JOIN feedback f ON f.job_id = j.id
+            WHERE j.id = ?
+            """,
+            (job_id,),
+        ).fetchone()
+    if revision_request_id:
+        _dispatch_revision_webhook(revision_request_id)
+    _update_review_pause_state()
+    if updated is None:
+        raise HTTPException(status_code=404, detail="Job not found")
+    return _job_detail(updated)
+
+
+def _store_legacy_feedback_only(job_id: str, payload: FeedbackIn) -> FeedbackOut:
+    now = utc_now()
+    with connect() as db:
+        job = db.execute("SELECT title, company FROM jobs WHERE id = ?", (job_id,)).fetchone()
+        if job is None:
+            raise HTTPException(status_code=404, detail="Job not found")
+        existing = db.execute("SELECT id, created_at FROM feedback WHERE job_id = ?", (job_id,)).fetchone()
+        feedback_id = existing["id"] if existing else str(uuid.uuid4())
+        created_at = existing["created_at"] if existing else now
+        reasons = _clean_list(payload.reasons)[:8]
+        note = payload.note.strip()
+        db.execute(
+            """
+            INSERT INTO feedback (id, job_id, rating, reasons_json, note, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(job_id) DO UPDATE SET
+                rating = excluded.rating,
+                reasons_json = excluded.reasons_json,
+                note = excluded.note,
+                updated_at = excluded.updated_at
+            """,
+            (feedback_id, job_id, payload.rating, encode_json(reasons), note, created_at, now),
+        )
+        db.execute(
+            "UPDATE jobs SET status = ?, reviewed_at = ?, updated_at = ? WHERE id = ?",
+            (payload.rating, now, now, job_id),
+        )
         db.execute(
             """
             INSERT INTO activity (id, kind, title, body, job_id, created_at)
@@ -564,12 +895,83 @@ def submit_feedback(job_id: str, payload: FeedbackIn) -> FeedbackOut:
             (
                 str(uuid.uuid4()),
                 f"Marked {job['company']} as {payload.rating}",
-                f"{job['title']} · {reason_text}",
+                f"{job['title']} · {', '.join(reasons) if reasons else 'No quick reason'}",
                 job_id,
                 now,
             ),
         )
-    return FeedbackOut(rating=payload.rating, reasons=payload.reasons, note=payload.note.strip(), updated_at=now)
+    return FeedbackOut(rating=payload.rating, reasons=reasons, note=note, updated_at=now)
+
+
+def _upsert_application_task(db: Any, job_id: str, pack_version: int, now: str) -> None:
+    existing = db.execute(
+        "SELECT id, created_at FROM application_tasks WHERE job_id = ? AND pack_version = ?",
+        (job_id, pack_version),
+    ).fetchone()
+    task_id = existing["id"] if existing else str(uuid.uuid4())
+    created_at = existing["created_at"] if existing else now
+    db.execute(
+        """
+        INSERT INTO application_tasks (
+            id, job_id, pack_version, state, required_fields_json, questions_json,
+            report, created_at, updated_at
+        ) VALUES (?, ?, ?, 'not_started', '[]', '[]', '', ?, ?)
+        ON CONFLICT(job_id, pack_version) DO UPDATE SET
+            state = CASE
+                WHEN application_tasks.state IN ('submitted', 'failed') THEN application_tasks.state
+                ELSE application_tasks.state
+            END,
+            updated_at = excluded.updated_at
+        """,
+        (task_id, job_id, pack_version, created_at, now),
+    )
+
+
+def _review_status() -> ReviewStatusOut:
+    with connect() as db:
+        config = db.execute("SELECT review_threshold FROM discovery_config WHERE id = 'default'").fetchone()
+    threshold = int(config["review_threshold"] if config and config["review_threshold"] else 3)
+    backlog = _review_backlog_count()
+    paused = backlog >= threshold
+    reason = f"Review backlog is {backlog}/{threshold}; approve, decline, or request changes before more discovery." if paused else None
+    return ReviewStatusOut(
+        backlog_count=backlog,
+        threshold=threshold,
+        paused_for_review=paused,
+        paused_reason=reason,
+    )
+
+
+def _review_backlog_count() -> int:
+    with connect() as db:
+        return int(db.execute(
+            """
+            SELECT COUNT(*)
+            FROM jobs j
+            JOIN application_packs p ON p.job_id = j.id
+            WHERE p.status = 'ready'
+              AND COALESCE(p.revision_state, 'current') != 'changes_requested'
+              AND COALESCE(j.imported_state, '') != 'expired'
+              AND NOT EXISTS (
+                SELECT 1 FROM review_decisions rd
+                WHERE rd.job_id = j.id AND rd.pack_version = p.version
+              )
+            """
+        ).fetchone()[0])
+
+
+def _update_review_pause_state() -> ReviewStatusOut:
+    status = _review_status()
+    with connect() as db:
+        db.execute(
+            """
+            UPDATE discovery_config
+            SET paused_for_review = ?, paused_reason = ?, updated_at = ?
+            WHERE id = 'default'
+            """,
+            (1 if status.paused_for_review else 0, status.paused_reason, utc_now()),
+        )
+    return status
 
 
 _REJECTED_AGENT_LETTER_OPENING = re.compile(
@@ -1271,6 +1673,7 @@ def _discovery_operations() -> DiscoveryOperationsOut:
         sources=sources,
         generated_queries=_generated_discovery_queries(preferences, enabled_source_ids),
         next_run_at=_next_discovery_run(schedule),
+        review=_review_status(),
         last_run=runs[0] if runs else None,
         recent_runs=runs,
     )
@@ -1311,6 +1714,35 @@ def _execute_discovery(trigger: Literal["manual", "scheduled"]) -> DiscoveryRunO
             VALUES (?, ?, 'running', ?, ?)
             """,
             (run_id, trigger, started_at, encode_json(queries)),
+        )
+
+    review = _update_review_pause_state()
+    if review.paused_for_review:
+        finished_at = utc_now()
+        with connect() as db:
+            db.execute(
+                """
+                UPDATE discovery_runs
+                SET status = 'succeeded', finished_at = ?, paused_for_review = 1, paused_reason = ?
+                WHERE id = ?
+                """,
+                (finished_at, review.paused_reason, run_id),
+            )
+            db.execute(
+                """
+                INSERT INTO activity (id, kind, title, body, created_at)
+                VALUES (?, 'discovery_paused', 'Discovery paused for review', ?, ?)
+                """,
+                (str(uuid.uuid4()), review.paused_reason or "", finished_at),
+            )
+        _notify_review_threshold(review)
+        return DiscoveryRunOut(
+            run_id=run_id,
+            queries=queries,
+            limit_per_query=preferences.discovery_limit_per_query,
+            results=[],
+            paused_for_review=True,
+            paused_reason=review.paused_reason,
         )
 
     try:
@@ -1455,6 +1887,8 @@ def _execute_discovery(trigger: Literal["manual", "scheduled"]) -> DiscoveryRunO
         jobs_added=jobs_added,
         jobs_evaluated=jobs_evaluated,
         packs_prepared=packs_prepared,
+        paused_for_review=False,
+        paused_reason=None,
     )
 
 
@@ -1824,6 +2258,8 @@ def _prepare_application_pack(
                     utc_now(),
                 ),
             )
+        _notify_pack_ready(job_id, version, revision_state)
+        _update_review_pause_state()
         return True
     except (HTTPException, ReactiveResumeError, SecretStoreError, ValueError, KeyError) as exc:
         _store_application_pack(
@@ -2033,6 +2469,12 @@ def _ready_pack_sql() -> str:
               AND p.resume_id IS NOT NULL
               AND p.letter_body IS NOT NULL
               AND p.resume_pdf_pages = 1
+              AND NOT EXISTS (
+                SELECT 1
+                FROM review_decisions rd
+                WHERE rd.job_id = p.job_id
+                  AND rd.pack_version = p.version
+              )
         )
     """
 
@@ -2109,6 +2551,8 @@ def _discovery_run_summary(row: Any) -> DiscoveryRunSummary:
         jobs_evaluated=row["jobs_evaluated"],
         packs_prepared=row["packs_prepared"],
         error=row["error"],
+        paused_for_review=bool(row["paused_for_review"]),
+        paused_reason=row["paused_reason"],
     )
 
 
@@ -2141,6 +2585,7 @@ async def _discovery_scheduler() -> None:
 
 
 def _run_due_discovery() -> None:
+    _send_daily_review_reminder()
     with connect() as db:
         config = db.execute("SELECT * FROM discovery_config WHERE id = 'default'").fetchone()
         if config is None or not config["schedule_enabled"]:
@@ -2175,6 +2620,53 @@ def _feedback_from_row(row: Any) -> FeedbackOut | None:
     )
 
 
+def _review_decision_for_pack(job_id: str, pack_version: int | None) -> ReviewDecisionOut | None:
+    if pack_version is None:
+        return None
+    with connect() as db:
+        row = db.execute(
+            "SELECT * FROM review_decisions WHERE job_id = ? AND pack_version = ?",
+            (job_id, pack_version),
+        ).fetchone()
+    if row is None:
+        return None
+    return ReviewDecisionOut(
+        job_id=row["job_id"],
+        pack_version=row["pack_version"],
+        decision=row["decision"],
+        reasons=decode_json(row["reasons_json"], []),
+        note=row["note"] or "",
+        updated_at=row["updated_at"],
+    )
+
+
+def _application_task(job_id: str, pack_version: int | None = None) -> ApplicationTaskOut | None:
+    params: tuple[Any, ...]
+    where = "job_id = ?"
+    params = (job_id,)
+    if pack_version is not None:
+        where += " AND pack_version = ?"
+        params = (job_id, pack_version)
+    with connect() as db:
+        row = db.execute(
+            f"SELECT * FROM application_tasks WHERE {where} ORDER BY pack_version DESC LIMIT 1",
+            params,
+        ).fetchone()
+    if row is None:
+        return None
+    return ApplicationTaskOut(
+        id=row["id"],
+        job_id=row["job_id"],
+        pack_version=row["pack_version"],
+        state=row["state"],
+        required_fields=decode_json(row["required_fields_json"], []),
+        questions=decode_json(row["questions_json"], []),
+        report=row["report"] or "",
+        created_at=row["created_at"],
+        updated_at=row["updated_at"],
+    )
+
+
 def _job_list_item(row: Any) -> JobListItem:
     pack = _application_pack(row["id"])
     return JobListItem(
@@ -2193,6 +2685,7 @@ def _job_list_item(row: Any) -> JobListItem:
         first_seen_at=row["first_seen_at"],
         source_url=row["source_url"],
         feedback=_feedback_from_row(row),
+        review_decision=_review_decision_for_pack(row["id"], pack.version if pack is not None else None),
         pack_status=pack.status if pack is not None else None,
         pack_revision_state=pack.revision_state if pack is not None else None,
     )
@@ -2242,6 +2735,7 @@ def _job_detail(row: Any) -> JobDetail:
         updated_at=row["updated_at"],
         reviewed_at=row["reviewed_at"],
         application_pack=pack,
+        application_task=_application_task(row["id"], pack.version if pack is not None else None),
     )
 
 
@@ -2296,6 +2790,262 @@ def _specific_discovery_locations(values: list[str]) -> list[str]:
     broad = {"at", "austria", "österreich", "osterreich"}
     specific = [value for value in cleaned if value.casefold() not in broad]
     return specific or cleaned
+
+
+def _subscription_endpoint(subscription: dict[str, object]) -> str:
+    endpoint = str(subscription.get("endpoint") or "").strip()
+    keys = subscription.get("keys")
+    if not endpoint or not isinstance(keys, dict) or not keys.get("p256dh") or not keys.get("auth"):
+        raise HTTPException(status_code=422, detail="Push subscription must include endpoint, p256dh, and auth")
+    return endpoint
+
+
+def _vapid_private_key_path() -> Path:
+    return database_path().parent / "jobflow-vapid-private.pem"
+
+
+def _vapid_public_key() -> str:
+    private_key = _load_or_create_vapid_private_key()
+    public_numbers = private_key.public_key().public_numbers()
+    raw = (
+        b"\x04"
+        + public_numbers.x.to_bytes(32, "big")
+        + public_numbers.y.to_bytes(32, "big")
+    )
+    return _b64url_encode(raw)
+
+
+def _load_or_create_vapid_private_key() -> ec.EllipticCurvePrivateKey:
+    path = _vapid_private_key_path()
+    if path.exists():
+        return serialization.load_pem_private_key(path.read_bytes(), password=None)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    private_key = ec.generate_private_key(ec.SECP256R1())
+    path.write_bytes(
+        private_key.private_bytes(
+            encoding=serialization.Encoding.PEM,
+            format=serialization.PrivateFormat.PKCS8,
+            encryption_algorithm=serialization.NoEncryption(),
+        )
+    )
+    try:
+        path.chmod(0o600)
+    except OSError:
+        pass
+    return private_key
+
+
+def _send_notification_to_all(payload: dict[str, object]) -> tuple[int, int]:
+    _load_or_create_vapid_private_key()
+    with connect() as db:
+        rows = db.execute(
+            "SELECT id, subscription_json FROM push_subscriptions WHERE disabled_at IS NULL"
+        ).fetchall()
+    sent = 0
+    failed = 0
+    for row in rows:
+        subscription = decode_json(row["subscription_json"], {})
+        try:
+            webpush(
+                subscription_info=subscription,
+                data=json.dumps(payload, separators=(",", ":"), ensure_ascii=False),
+                vapid_private_key=str(_vapid_private_key_path()),
+                vapid_claims={"sub": os.environ.get("JOBFLOW_VAPID_SUBJECT", "mailto:jobflow@localhost")},
+            )
+            sent += 1
+        except WebPushException as exc:
+            failed += 1
+            status_code = getattr(getattr(exc, "response", None), "status_code", None)
+            disabled_at = utc_now() if status_code in {404, 410} else None
+            with connect() as db:
+                db.execute(
+                    """
+                    UPDATE push_subscriptions
+                    SET last_error = ?, disabled_at = COALESCE(?, disabled_at), updated_at = ?
+                    WHERE id = ?
+                    """,
+                    (str(exc)[:300], disabled_at, utc_now(), row["id"]),
+                )
+        except Exception as exc:
+            failed += 1
+            with connect() as db:
+                db.execute(
+                    "UPDATE push_subscriptions SET last_error = ?, updated_at = ? WHERE id = ?",
+                    (str(exc)[:300], utc_now(), row["id"]),
+                )
+    return sent, failed
+
+
+def _notify_once(
+    key: str,
+    event_kind: str,
+    payload: dict[str, object],
+    *,
+    job_id: str | None = None,
+) -> None:
+    now = utc_now()
+    with connect() as db:
+        inserted = db.execute(
+            """
+            INSERT OR IGNORE INTO notification_dedupe(key, event_kind, job_id, created_at)
+            VALUES (?, ?, ?, ?)
+            """,
+            (key, event_kind, job_id, now),
+        ).rowcount
+    if inserted:
+        _send_notification_to_all(payload)
+
+
+def _notify_pack_ready(job_id: str, version: int, revision_state: str) -> None:
+    with connect() as db:
+        job = db.execute("SELECT title, company FROM jobs WHERE id = ?", (job_id,)).fetchone()
+    if job is None:
+        return
+    revised = version > 1 or revision_state == "regenerated"
+    _notify_once(
+        f"{'pack_revised' if revised else 'pack_ready'}:{job_id}:{version}",
+        "pack_revised" if revised else "pack_ready",
+        {
+            "title": "Revised pack ready" if revised else "Application pack ready",
+            "body": f"{job['company']} · {job['title']}",
+            "url": f"/?job={job_id}",
+            "tag": f"jobflow-pack-{job_id}-{version}",
+        },
+        job_id=job_id,
+    )
+    _notify_review_threshold(_review_status())
+
+
+def _notify_review_threshold(status: ReviewStatusOut) -> None:
+    if not status.paused_for_review:
+        return
+    with connect() as db:
+        rows = db.execute(
+            """
+            SELECT j.id, p.version
+            FROM jobs j
+            JOIN application_packs p ON p.job_id = j.id
+            WHERE p.status = 'ready'
+              AND COALESCE(j.imported_state, '') != 'expired'
+              AND NOT EXISTS (
+                SELECT 1 FROM review_decisions rd
+                WHERE rd.job_id = j.id AND rd.pack_version = p.version
+              )
+            ORDER BY j.updated_at DESC, j.id
+            """
+        ).fetchall()
+    fingerprint = hashlib.sha256(
+        "|".join(f"{row['id']}:{row['version']}" for row in rows).encode("utf-8")
+    ).hexdigest()[:16]
+    _notify_once(
+        f"review_threshold:{status.threshold}:{fingerprint}",
+        "review_threshold",
+        {
+            "title": "JobFlow discovery paused",
+            "body": status.paused_reason or "Review ready packs before more discovery.",
+            "url": "/",
+            "tag": "jobflow-review-threshold",
+        },
+    )
+
+
+def _send_daily_review_reminder() -> None:
+    status = _review_status()
+    if status.backlog_count <= 0:
+        return
+    local_day = datetime.now(timezone.utc).astimezone(ZoneInfo("Europe/Vienna")).date().isoformat()
+    _notify_once(
+        f"daily_review_reminder:{local_day}",
+        "daily_review_reminder",
+        {
+            "title": "JobFlow review reminder",
+            "body": f"{status.backlog_count} ready pack{'s' if status.backlog_count != 1 else ''} waiting for a decision.",
+            "url": "/",
+            "tag": "jobflow-daily-review-reminder",
+        },
+    )
+
+
+def _notify_application_task(job_id: str, state: str) -> None:
+    with connect() as db:
+        row = db.execute("SELECT title, company FROM jobs WHERE id = ?", (job_id,)).fetchone()
+    if row is None:
+        return
+    titles = {
+        "needs_input": "Application needs input",
+        "submitted": "Application marked submitted",
+        "failed": "Application task failed",
+    }
+    _notify_once(
+        f"application_task:{state}:{job_id}",
+        f"application_{state}",
+        {
+            "title": titles.get(state, "Application task updated"),
+            "body": f"{row['company']} · {row['title']}",
+            "url": f"/?job={job_id}",
+            "tag": f"jobflow-application-{job_id}",
+        },
+        job_id=job_id,
+    )
+
+
+def _dispatch_revision_webhook(request_id: str) -> None:
+    webhook_url = os.environ.get(REVISION_WEBHOOK_URL_ENV, "").strip()
+    now = utc_now()
+    if not webhook_url:
+        with connect() as db:
+            db.execute(
+                "UPDATE revision_requests SET status = 'skipped', dispatched_at = ? WHERE id = ?",
+                (now, request_id),
+            )
+        return
+    with connect() as db:
+        row = db.execute("SELECT * FROM revision_requests WHERE id = ?", (request_id,)).fetchone()
+    if row is None:
+        return
+    payload = {
+        "request_id": row["id"],
+        "job_id": row["job_id"],
+        "pack_version": row["pack_version"],
+        "reasons": decode_json(row["reasons_json"], []),
+        "note": row["note"] or "",
+        "created_at": row["created_at"],
+    }
+    body = json.dumps(payload, separators=(",", ":"), sort_keys=True).encode("utf-8")
+    secret = os.environ.get(REVISION_WEBHOOK_SECRET_ENV, "").encode("utf-8")
+    headers = {"Content-Type": "application/json"}
+    if secret:
+        headers["X-JobFlow-Signature"] = "sha256=" + hmac.new(secret, body, hashlib.sha256).hexdigest()
+        webhook_timestamp = str(int(datetime.now(timezone.utc).timestamp()))
+        signed_payload = webhook_timestamp.encode("ascii") + b"." + body
+        headers["X-Webhook-Timestamp"] = webhook_timestamp
+        headers["X-Webhook-Signature-V2"] = hmac.new(
+            secret,
+            signed_payload,
+            hashlib.sha256,
+        ).hexdigest()
+    try:
+        request = UrlRequest(webhook_url, data=body, headers=headers, method="POST")
+        with urlopen(request, timeout=10) as response:
+            status = getattr(response, "status", 200)
+            if status >= 400:
+                raise URLError(f"HTTP {status}")
+        with connect() as db:
+            db.execute(
+                "UPDATE revision_requests SET status = 'dispatched', error = NULL, dispatched_at = ? WHERE id = ?",
+                (utc_now(), request_id),
+            )
+    except Exception as exc:
+        with connect() as db:
+            db.execute(
+                "UPDATE revision_requests SET status = 'failed', error = ?, dispatched_at = ? WHERE id = ?",
+                (str(exc)[:500], utc_now(), request_id),
+            )
+
+
+def _require_agent_auth(request: Request) -> None:
+    if not _valid_agent_token(request.headers.get("Authorization")):
+        raise HTTPException(status_code=401, detail="Agent token required")
 
 
 def _auth_config() -> tuple[str, str] | None:

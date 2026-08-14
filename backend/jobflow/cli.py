@@ -43,6 +43,10 @@ def build_parser() -> argparse.ArgumentParser:
     )
     commands = parser.add_subparsers(dest="command", required=True)
     commands.add_parser("status", help="Read backend health.")
+    commands.add_parser(
+        "review-status",
+        help="Read the durable review backlog and discovery pause state.",
+    )
 
     jobs = commands.add_parser("jobs", help="Inspect, ingest, and analyze jobs.")
     job_commands = jobs.add_subparsers(dest="jobs_command", required=True)
@@ -103,6 +107,8 @@ def build_parser() -> argparse.ArgumentParser:
 def dispatch(args: argparse.Namespace, client: "Client") -> Any:
     if args.command == "status":
         return client.request("GET", "/health")
+    if args.command == "review-status":
+        return client.request("GET", "/api/review/status")
     if args.command == "jobs":
         if args.jobs_command == "list":
             query = urlencode({"filter": args.filter, "limit": args.limit})

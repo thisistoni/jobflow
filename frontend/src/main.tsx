@@ -33,6 +33,8 @@ import {
 import "./styles.css";
 
 type Rating = "good" | "maybe" | "bad";
+type ReviewDecisionValue = "approve" | "decline" | "request_changes";
+type ApplicationTaskState = "not_started" | "prepared" | "needs_input" | "awaiting_final_confirmation" | "submitted" | "failed";
 type View = "inbox" | "pipeline" | "activity" | "preferences";
 type Filter = "inbox" | "strong" | "maybe" | "low" | "reviewed" | "all";
 
@@ -46,6 +48,27 @@ type Feedback = {
   rating: Rating;
   reasons: string[];
   note: string;
+  updated_at: string;
+};
+
+type ReviewDecision = {
+  job_id: string;
+  pack_version: number;
+  decision: ReviewDecisionValue;
+  reasons: string[];
+  note: string;
+  updated_at: string;
+};
+
+type ApplicationTask = {
+  id: string;
+  job_id: string;
+  pack_version: number;
+  state: ApplicationTaskState;
+  required_fields: string[];
+  questions: string[];
+  report: string;
+  created_at: string;
   updated_at: string;
 };
 
@@ -65,6 +88,7 @@ type JobListItem = {
   first_seen_at: string;
   source_url: string;
   feedback?: Feedback | null;
+  review_decision?: ReviewDecision | null;
   pack_status?: "preparing" | "ready" | "failed" | null;
   pack_revision_state?: "current" | "changes_requested" | "regenerated" | null;
 };
@@ -128,6 +152,7 @@ type JobDetail = JobListItem & {
   updated_at: string;
   reviewed_at?: string | null;
   application_pack: ApplicationPack | null;
+  application_task: ApplicationTask | null;
 };
 
 type Preferences = {
@@ -167,6 +192,8 @@ type DiscoveryRun = {
   jobs_added: number;
   jobs_evaluated: number;
   packs_prepared: number;
+  paused_for_review?: boolean;
+  paused_reason?: string | null;
 };
 
 type DiscoveryRunSummary = {
@@ -182,6 +209,15 @@ type DiscoveryRunSummary = {
   jobs_evaluated: number;
   packs_prepared: number;
   error?: string | null;
+  paused_for_review: boolean;
+  paused_reason?: string | null;
+};
+
+type ReviewStatus = {
+  backlog_count: number;
+  threshold: number;
+  paused_for_review: boolean;
+  paused_reason?: string | null;
 };
 
 type DiscoveryOperations = {
@@ -197,8 +233,16 @@ type DiscoveryOperations = {
   }>;
   generated_queries: string[];
   next_run_at?: string | null;
+  review: ReviewStatus;
   last_run?: DiscoveryRunSummary | null;
   recent_runs: DiscoveryRunSummary[];
+};
+
+type PushStatus = {
+  supported: boolean;
+  public_key: string;
+  subscribed: boolean;
+  subscription_count: number;
 };
 
 type ReactiveResumeStatus = {
@@ -244,6 +288,9 @@ function App() {
   const [pulse, setPulse] = React.useState<DashboardPulse>({ days: [], today_count: 0 });
   const [discoveryOperations, setDiscoveryOperations] = React.useState<DiscoveryOperations | null>(null);
   const [reactiveResume, setReactiveResume] = React.useState<ReactiveResumeStatus | null>(null);
+  const [notificationStatus, setNotificationStatus] = React.useState<PushStatus | null>(null);
+  const [notificationBusy, setNotificationBusy] = React.useState(false);
+  const [notificationMessage, setNotificationMessage] = React.useState<string | null>(null);
   const [loading, setLoading] = React.useState(true);
   const [discoveryRunning, setDiscoveryRunning] = React.useState(false);
   const [discoveryMessage, setDiscoveryMessage] = React.useState<string | null>(null);
@@ -270,6 +317,8 @@ function App() {
       setPulse({ days: [], today_count: 0 });
       setDiscoveryOperations(null);
       setReactiveResume(null);
+      setNotificationStatus(null);
+      setNotificationMessage(null);
       setError(null);
       setFeedbackMode(null);
       setFeedbackSaving(false);
@@ -323,10 +372,12 @@ function App() {
     if (!isUnlocked) return;
     Promise.all([
       api<DashboardPulse>("/api/dashboard/pulse?days=20"),
-      api<DiscoveryOperations>("/api/discovery/operations")
-    ]).then(([nextPulse, operations]) => {
+      api<DiscoveryOperations>("/api/discovery/operations"),
+      api<PushStatus>("/api/notifications/status")
+    ]).then(([nextPulse, operations, pushStatus]) => {
       setPulse(nextPulse);
       setDiscoveryOperations(operations);
+      setNotificationStatus(pushStatus);
     }).catch((reason: unknown) => {
       if (!handleAuthExpired(reason)) setError(messageFrom(reason));
     });
@@ -361,11 +412,13 @@ function App() {
       Promise.all([
         api<Preferences>("/api/preferences"),
         api<DiscoveryOperations>("/api/discovery/operations"),
-        api<ReactiveResumeStatus>("/api/integrations/reactive-resume")
-      ]).then(([nextPreferences, operations, resumeStatus]) => {
+        api<ReactiveResumeStatus>("/api/integrations/reactive-resume"),
+        api<PushStatus>("/api/notifications/status")
+      ]).then(([nextPreferences, operations, resumeStatus, pushStatus]) => {
         setPreferences(nextPreferences);
         setDiscoveryOperations(operations);
         setReactiveResume(resumeStatus);
+        setNotificationStatus(pushStatus);
       }).catch((reason: unknown) => {
         if (!handleAuthExpired(reason)) setError(messageFrom(reason));
       });
@@ -410,33 +463,33 @@ function App() {
   const inboxCount = allJobs.filter((job) => job.status === "inbox" && job.pack_status === "ready").length;
   const strongCount = allJobs.filter((job) => job.status === "inbox" && job.pack_status === "ready" && (job.score ?? 0) >= 70).length;
 
-  async function submitFeedback(rating: Rating, reasons: string[], note: string) {
+  async function submitReviewDecision(decision: ReviewDecisionValue, reasons: string[], note: string) {
     if (!selectedJob || feedbackSaving) return;
     const actedJobId = selectedJob.id;
     setFeedbackSaving(true);
     setFeedbackError(null);
     try {
-      await api<Feedback>(`/api/jobs/${actedJobId}/feedback`, {
+      const updated = await api<JobDetail>(`/api/jobs/${actedJobId}/review-decision`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ rating, reasons, note })
+        body: JSON.stringify({ decision, reasons, note })
       });
-      const updated = await api<JobDetail>(`/api/jobs/${actedJobId}`);
       setSelectedJob(updated);
       setFeedbackMode(null);
-      const text = rating === "bad"
-        ? "Moved to Passed. Your decline feedback is saved."
-        : rating === "maybe"
-          ? "Moved to Review. The current pack is invalidated until regenerated."
-          : "Application pack approved and saved for manual application.";
+      const text = decision === "decline"
+        ? "Moved to Passed. Your decline decision is saved."
+        : decision === "request_changes"
+          ? "Moved to Review. Luna revision is queued for a new pack version."
+          : "Application preparation queued. No employer contact or final submission is authorized.";
       setActionNotice({ jobId: actedJobId, text });
-      if (rating === "maybe") {
+      if (decision === "request_changes") {
         setJobs((current) => current.filter((job) => job.id !== actedJobId));
       } else {
         await loadJobs();
       }
       await loadAllJobs();
       setActivity(await api<ActivityItem[]>("/api/activity"));
+      setDiscoveryOperations(await api<DiscoveryOperations>("/api/discovery/operations"));
     } catch (reason) {
       if (!handleAuthExpired(reason)) {
         const message = messageFrom(reason);
@@ -486,7 +539,9 @@ function App() {
     try {
       const result = await api<DiscoveryRun>("/api/discovery/run", { method: "POST" });
       setDiscoveryMessage(
-        `${result.results.length} unique candidates · ${result.jobs_added} new jobs · ${result.packs_prepared} application packs ready.`
+        result.paused_for_review
+          ? result.paused_reason || "Discovery paused for review."
+          : `${result.results.length} unique candidates · ${result.jobs_added} new jobs · ${result.packs_prepared} application packs ready.`
       );
       setDiscoveryOperations(await api<DiscoveryOperations>("/api/discovery/operations"));
       setActivity(await api<ActivityItem[]>("/api/activity"));
@@ -536,6 +591,84 @@ function App() {
     }
   }
 
+  async function enableNotifications() {
+    setNotificationBusy(true);
+    setNotificationMessage(null);
+    try {
+      if (!("serviceWorker" in navigator) || !("PushManager" in window) || !("Notification" in window)) {
+        throw new Error("This browser does not support Web Push notifications.");
+      }
+      const status = notificationStatus ?? await api<PushStatus>("/api/notifications/status");
+      setNotificationStatus(status);
+      const permission = await Notification.requestPermission();
+      if (permission !== "granted") throw new Error("Notification permission was not granted.");
+      const registration = await navigator.serviceWorker.ready;
+      let subscription = await registration.pushManager.getSubscription();
+      if (!subscription) {
+        subscription = await registration.pushManager.subscribe({
+          userVisibleOnly: true,
+          applicationServerKey: urlBase64ToUint8Array(status.public_key)
+        });
+      }
+      const updated = await api<PushStatus>("/api/notifications/subscribe", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ subscription: subscription.toJSON() })
+      });
+      setNotificationStatus(updated);
+      setNotificationMessage("Notifications enabled.");
+    } catch (reason) {
+      const message = messageFrom(reason);
+      setNotificationMessage(message);
+      setError(message);
+    } finally {
+      setNotificationBusy(false);
+    }
+  }
+
+  async function disableNotifications() {
+    setNotificationBusy(true);
+    setNotificationMessage(null);
+    try {
+      if ("serviceWorker" in navigator) {
+        const registration = await navigator.serviceWorker.ready;
+        const subscription = await registration.pushManager.getSubscription();
+        if (subscription) {
+          await api<PushStatus>("/api/notifications/unsubscribe", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ subscription: subscription.toJSON() })
+          });
+          await subscription.unsubscribe();
+        }
+      }
+      setNotificationStatus(await api<PushStatus>("/api/notifications/status"));
+      setNotificationMessage("Notifications disabled for this browser.");
+    } catch (reason) {
+      const message = messageFrom(reason);
+      setNotificationMessage(message);
+      setError(message);
+    } finally {
+      setNotificationBusy(false);
+    }
+  }
+
+  async function sendTestNotification() {
+    setNotificationBusy(true);
+    setNotificationMessage(null);
+    try {
+      const result = await api<{ sent: number; failed: number }>("/api/notifications/test", { method: "POST" });
+      setNotificationMessage(`${result.sent} sent · ${result.failed} failed`);
+      setNotificationStatus(await api<PushStatus>("/api/notifications/status"));
+    } catch (reason) {
+      const message = messageFrom(reason);
+      setNotificationMessage(message);
+      setError(message);
+    } finally {
+      setNotificationBusy(false);
+    }
+  }
+
   async function updateReactiveResume(path: string, method: "POST" | "PUT" | "DELETE", payload?: unknown) {
     try {
       const options: RequestInit = { method };
@@ -577,6 +710,8 @@ function App() {
       setPulse({ days: [], today_count: 0 });
       setDiscoveryOperations(null);
       setReactiveResume(null);
+      setNotificationStatus(null);
+      setNotificationMessage(null);
       setMobileDetailOpen(false);
       setFeedbackMode(null);
       setFeedbackSaving(false);
@@ -608,7 +743,7 @@ function App() {
         saving={feedbackSaving}
         error={feedbackError}
         onClose={() => setFeedbackMode(null)}
-        onFeedback={(reasons, note) => void submitFeedback(feedbackMode === "decline" ? "bad" : "maybe", reasons, note)}
+        onFeedback={(reasons, note) => void submitReviewDecision(feedbackMode === "decline" ? "decline" : "request_changes", reasons, note)}
       />
   ) : view === "inbox" ? (
     selectedJob ? (
@@ -617,11 +752,17 @@ function App() {
         actionNotice={actionNotice?.jobId === selectedJob.id ? actionNotice.text : null}
         saving={feedbackSaving || regenerationRunning}
         error={feedbackError}
+        notificationStatus={notificationStatus}
+        notificationBusy={notificationBusy}
+        notificationMessage={notificationMessage}
         onBack={() => setMobileDetailOpen(false)}
         onDecline={() => setFeedbackMode("decline")}
         onRevise={() => setFeedbackMode("revise")}
-        onApprove={() => void submitFeedback("good", ["Application pack approved"], "")}
+        onApprove={() => void submitReviewDecision("approve", ["Application preparation queued"], "")}
         onRegenerate={() => void regeneratePack()}
+        onEnableNotifications={() => void enableNotifications()}
+        onDisableNotifications={() => void disableNotifications()}
+        onTestNotification={() => void sendTestNotification()}
       />
     ) : (
       <EmptyDetail />
@@ -660,7 +801,13 @@ function App() {
       discoveryMessage={discoveryMessage}
       discoveryError={discoveryError}
       reactiveResume={reactiveResume}
+      notificationStatus={notificationStatus}
+      notificationBusy={notificationBusy}
+      notificationMessage={notificationMessage}
       onRunDiscovery={runDiscovery}
+      onEnableNotifications={() => void enableNotifications()}
+      onDisableNotifications={() => void disableNotifications()}
+      onTestNotification={() => void sendTestNotification()}
       onSaveDiscovery={saveDiscoveryConfig}
       onConnectReactiveResume={(apiKey, baseUrl) => updateReactiveResume(
         "/api/integrations/reactive-resume/connect",
@@ -793,7 +940,9 @@ function InboxScreen({
           <strong>{jobs.length.toString().padStart(2, "0")}</strong>
           <div>
             <h2>{filter === "inbox" ? "application packs ready" : "jobs in this view"}</h2>
-            <p>{filter === "inbox" && operations?.last_run
+            <p>{filter === "inbox" && operations?.review.paused_for_review
+              ? operations.review.paused_reason
+              : filter === "inbox" && operations?.last_run
               ? `Last search ${formatDateTime(operations.last_run.finished_at || operations.last_run.started_at)} · ${operations.last_run.jobs_added} new · ${operations.last_run.packs_prepared} packs`
               : filter === "inbox" ? "Prepared CV + PDF application letter" : "Only complete packs and reviewed history are shown"}</p>
           </div>
@@ -810,6 +959,7 @@ function InboxScreen({
           ))}
         </nav>
 
+        {operations?.review.paused_for_review ? <div className="discovery-status warning" role="status">{operations.review.paused_reason}</div> : null}
         {discoveryMessage ? <div className="discovery-status" role="status">{discoveryMessage}</div> : null}
 
         {error ? <div className="state-card error">{error}</div> : null}
@@ -866,30 +1016,43 @@ function JobReview({
   actionNotice,
   saving,
   error,
+  notificationStatus,
+  notificationBusy,
+  notificationMessage,
   onBack,
   onDecline,
   onRevise,
   onApprove,
-  onRegenerate
+  onRegenerate,
+  onEnableNotifications,
+  onDisableNotifications,
+  onTestNotification
 }: {
   job: JobDetail;
   actionNotice: string | null;
   saving: boolean;
   error: string | null;
+  notificationStatus: PushStatus | null;
+  notificationBusy: boolean;
+  notificationMessage: string | null;
   onBack: () => void;
   onDecline: () => void;
   onRevise: () => void;
   onApprove: () => void;
   onRegenerate: () => void;
+  onEnableNotifications: () => void;
+  onDisableNotifications: () => void;
+  onTestNotification: () => void;
 }) {
   const pack = job.application_pack;
+  const task = job.application_task;
   const statusCopy = actionNotice || (
     job.status === "bad"
-      ? "Passed. Your decline feedback is saved."
+      ? "Passed. Your decline decision is saved."
       : job.status === "maybe"
-        ? "Changes requested. Your feedback is attached in Review."
+        ? "Changes requested. Luna revision is queued for a new pack version."
         : job.status === "good"
-          ? "Pack approved and saved for manual application."
+          ? "Application preparation queued. No employer contact or final submission is authorized."
           : null
   );
   return (
@@ -928,6 +1091,15 @@ function JobReview({
           </div>
         ) : null}
         {error ? <div className="state-card error">{error}</div> : null}
+        <NotificationControl
+          status={notificationStatus}
+          busy={notificationBusy}
+          message={notificationMessage}
+          compact
+          onEnable={onEnableNotifications}
+          onDisable={onDisableNotifications}
+          onTest={onTestNotification}
+        />
         <section className="insight-row">
           <span>01</span>
           <div>
@@ -975,6 +1147,8 @@ function JobReview({
           ) : null}
         </section>
 
+        {task ? <ApplicationTaskPanel task={task} /> : null}
+
         <div className="spec-strip">
           <Spec label="Salary" value={formatSalary(job)} />
           <Spec label="Type" value={(job.work_mode || "Unknown").toUpperCase()} />
@@ -997,7 +1171,7 @@ function JobReview({
           REQUEST CHANGES
         </button>
         <button className="approve-action" type="button" onClick={onApprove} disabled={saving || pack?.status !== "ready"}>
-          {saving ? "SAVING…" : "APPROVE PACK"} <ArrowRight size={16} />
+          {saving ? "SAVING…" : "APPROVE + QUEUE PREP"} <ArrowRight size={16} />
         </button>
       </footer>
     </article>
@@ -1094,6 +1268,80 @@ function DeclineFeedback({
   );
 }
 
+function NotificationControl({
+  status,
+  busy,
+  message,
+  compact = false,
+  onEnable,
+  onDisable,
+  onTest
+}: {
+  status: PushStatus | null;
+  busy: boolean;
+  message: string | null;
+  compact?: boolean;
+  onEnable: () => void;
+  onDisable: () => void;
+  onTest: () => void;
+}) {
+  const browserReady = typeof window !== "undefined" && "Notification" in window && "serviceWorker" in navigator && "PushManager" in window;
+  const enabled = Boolean(status?.subscribed);
+  return (
+    <section className={compact ? "notification-card compact" : "notification-card"}>
+      <span className="company-mark dark"><Bell size={14} /></span>
+      <div>
+        <b>{enabled ? "Notifications enabled" : "Enable notifications"}</b>
+        <small>
+          {enabled
+            ? `${status?.subscription_count ?? 0} active browser subscription${status?.subscription_count === 1 ? "" : "s"}`
+            : browserReady ? "Get alerts for ready packs, paused discovery, reminders, and application task updates." : "This browser cannot receive Web Push notifications."}
+        </small>
+        {message ? <em>{message}</em> : null}
+      </div>
+      <div className="notification-actions">
+        {enabled ? (
+          <>
+            <button type="button" onClick={onTest} disabled={busy}>TEST</button>
+            <button type="button" onClick={onDisable} disabled={busy}>DISABLE</button>
+          </>
+        ) : (
+          <button type="button" onClick={onEnable} disabled={busy || !browserReady}>
+            {busy ? "WORKING" : "ENABLE"}
+          </button>
+        )}
+      </div>
+    </section>
+  );
+}
+
+function ApplicationTaskPanel({ task }: { task: ApplicationTask }) {
+  return (
+    <section className={`application-task-panel task-${task.state}`}>
+      <div className="pack-header">
+        <b>APPLICATION TASK</b>
+        <span>{task.state.replace(/_/g, " ").toUpperCase()}</span>
+      </div>
+      <p className="pack-state-copy">
+        This task tracks preparation only. Final submission still requires explicit confirmation outside JobFlow automation.
+      </p>
+      {task.required_fields.length ? (
+        <div className="task-list">
+          <b>UNKNOWN REQUIRED FIELDS</b>
+          {task.required_fields.map((field) => <span key={field}>{field}</span>)}
+        </div>
+      ) : null}
+      {task.questions.length ? (
+        <div className="task-list">
+          <b>QUESTIONS</b>
+          {task.questions.map((question) => <span key={question}>{question}</span>)}
+        </div>
+      ) : null}
+      {task.report ? <p className="task-report">{task.report}</p> : null}
+    </section>
+  );
+}
+
 function LoginScreen({
   loading = false,
   error,
@@ -1178,7 +1426,13 @@ function PreferencesView({
   discoveryMessage,
   discoveryError,
   reactiveResume,
+  notificationStatus,
+  notificationBusy,
+  notificationMessage,
   onRunDiscovery,
+  onEnableNotifications,
+  onDisableNotifications,
+  onTestNotification,
   onSaveDiscovery,
   onConnectReactiveResume,
   onRefreshReactiveResume,
@@ -1192,7 +1446,13 @@ function PreferencesView({
   discoveryMessage: string | null;
   discoveryError: string | null;
   reactiveResume: ReactiveResumeStatus | null;
+  notificationStatus: PushStatus | null;
+  notificationBusy: boolean;
+  notificationMessage: string | null;
   onRunDiscovery: () => Promise<void>;
+  onEnableNotifications: () => void;
+  onDisableNotifications: () => void;
+  onTestNotification: () => void;
   onSaveDiscovery: (schedule: DiscoveryOperations["schedule"], sourcesEnabled: Record<string, boolean>) => Promise<DiscoveryOperations>;
   onConnectReactiveResume: (apiKey: string, baseUrl: string) => Promise<ReactiveResumeStatus>;
   onRefreshReactiveResume: () => Promise<ReactiveResumeStatus>;
@@ -1439,7 +1699,7 @@ function PreferencesView({
             <span className="company-mark dark"><LockKeyhole size={14} /></span>
             <span>
               <b>Applying requires your approval</b>
-              <small>Approval saves the pack as good for your manual application. JobFlow does not submit or contact employers.</small>
+              <small>Approval queues application preparation only. JobFlow does not submit, contact employers, or authorize final submission.</small>
             </span>
           </div>
         </section>
@@ -1452,9 +1712,21 @@ function PreferencesView({
           onDisconnect={onDisconnectReactiveResume}
         />
 
+        <section className="pref-section">
+          <h2>Notifications</h2>
+          <NotificationControl
+            status={notificationStatus}
+            busy={notificationBusy}
+            message={notificationMessage}
+            onEnable={onEnableNotifications}
+            onDisable={onDisableNotifications}
+            onTest={onTestNotification}
+          />
+        </section>
+
         <div className="learning-note">
           <span className="company-mark dark"><BrainCircuit size={14} /></span>
-          <b>Feedback is stored per job and used when regenerating that job's pack.</b>
+          <b>Review decisions are stored per pack version; feedback remains available for older clients.</b>
         </div>
       </div>
 
@@ -1670,7 +1942,7 @@ function DiscoveryOperationsPanel({
       <div className="operations-summary">
         <div>
           <span>NEXT SEARCH</span>
-          <strong>{operations.next_run_at ? formatDateTime(operations.next_run_at) : "PAUSED"}</strong>
+          <strong>{operations.review.paused_for_review ? "REVIEW PAUSED" : operations.next_run_at ? formatDateTime(operations.next_run_at) : "PAUSED"}</strong>
         </div>
         <div>
           <span>LAST SEARCH</span>
@@ -1682,6 +1954,7 @@ function DiscoveryOperationsPanel({
         <ScanSearch size={16} /> {running ? "SEARCHING…" : "SEARCH NOW"}
       </button>
       {message ? <p className="operation-message">{message}</p> : null}
+      {operations.review.paused_for_review ? <p className="operation-message warning">{operations.review.paused_reason}</p> : null}
       {error ? <p className="operation-message error">{error}</p> : null}
       {dirty ? <p className="operation-message">Save schedule and source changes before Search Now.</p> : null}
 
@@ -1750,8 +2023,8 @@ function DiscoveryOperationsPanel({
           <div className="run-row" key={run.id}>
             <span className={`run-state ${run.status}`} />
             <span>
-              <b>{run.status === "succeeded" ? `${run.unique_count} found → ${run.jobs_added} new jobs → ${run.packs_prepared} packs` : run.status}</b>
-              <small>{run.trigger === "manual" ? "Search now" : "Scheduled"} · {formatDateTime(run.started_at)}{run.error ? ` · ${run.error}` : ""}</small>
+              <b>{run.paused_for_review ? "paused for review" : run.status === "succeeded" ? `${run.unique_count} found → ${run.jobs_added} new jobs → ${run.packs_prepared} packs` : run.status}</b>
+              <small>{run.trigger === "manual" ? "Search now" : "Scheduled"} · {formatDateTime(run.started_at)}{run.paused_reason ? ` · ${run.paused_reason}` : run.error ? ` · ${run.error}` : ""}</small>
             </span>
           </div>
         ))}
@@ -2338,6 +2611,15 @@ function boundedNumber(value: string, min: number, max: number, fallback: number
 
 function messageFrom(reason: unknown) {
   return reason instanceof Error ? reason.message : "Unknown error";
+}
+
+function urlBase64ToUint8Array(value: string) {
+  const padding = "=".repeat((4 - value.length % 4) % 4);
+  const base64 = (value + padding).replace(/-/g, "+").replace(/_/g, "/");
+  const raw = window.atob(base64);
+  const output = new Uint8Array(raw.length);
+  for (let index = 0; index < raw.length; index += 1) output[index] = raw.charCodeAt(index);
+  return output;
 }
 
 if ("serviceWorker" in navigator) {

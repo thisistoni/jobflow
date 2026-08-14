@@ -142,6 +142,9 @@ def init_db(path: str | Path | None = None) -> None:
                 schedule_enabled INTEGER NOT NULL DEFAULT 1,
                 timezone TEXT NOT NULL DEFAULT 'Europe/Vienna',
                 schedule_times_json TEXT NOT NULL DEFAULT '["07:00","13:00","19:00"]',
+                review_threshold INTEGER NOT NULL DEFAULT 3,
+                paused_for_review INTEGER NOT NULL DEFAULT 0,
+                paused_reason TEXT,
                 last_scheduled_slot TEXT,
                 updated_at TEXT NOT NULL
             );
@@ -167,6 +170,8 @@ def init_db(path: str | Path | None = None) -> None:
                 jobs_added INTEGER NOT NULL DEFAULT 0,
                 jobs_evaluated INTEGER NOT NULL DEFAULT 0,
                 packs_prepared INTEGER NOT NULL DEFAULT 0,
+                paused_for_review INTEGER NOT NULL DEFAULT 0,
+                paused_reason TEXT,
                 error TEXT
             );
 
@@ -244,6 +249,73 @@ def init_db(path: str | Path | None = None) -> None:
                 created_at TEXT NOT NULL,
                 PRIMARY KEY (job_id, version)
             );
+
+            CREATE TABLE IF NOT EXISTS review_decisions (
+                id TEXT PRIMARY KEY,
+                job_id TEXT NOT NULL REFERENCES jobs(id) ON DELETE CASCADE,
+                pack_version INTEGER NOT NULL,
+                decision TEXT NOT NULL CHECK (decision IN ('approve', 'decline', 'request_changes')),
+                reasons_json TEXT NOT NULL DEFAULT '[]',
+                note TEXT NOT NULL DEFAULT '',
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                UNIQUE (job_id, pack_version)
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_review_decisions_job_version
+            ON review_decisions(job_id, pack_version);
+
+            CREATE TABLE IF NOT EXISTS application_tasks (
+                id TEXT PRIMARY KEY,
+                job_id TEXT NOT NULL REFERENCES jobs(id) ON DELETE CASCADE,
+                pack_version INTEGER NOT NULL,
+                state TEXT NOT NULL CHECK (
+                    state IN (
+                        'not_started',
+                        'prepared',
+                        'needs_input',
+                        'awaiting_final_confirmation',
+                        'submitted',
+                        'failed'
+                    )
+                ),
+                required_fields_json TEXT NOT NULL DEFAULT '[]',
+                questions_json TEXT NOT NULL DEFAULT '[]',
+                report TEXT NOT NULL DEFAULT '',
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                UNIQUE (job_id, pack_version)
+            );
+
+            CREATE TABLE IF NOT EXISTS revision_requests (
+                id TEXT PRIMARY KEY,
+                job_id TEXT NOT NULL REFERENCES jobs(id) ON DELETE CASCADE,
+                pack_version INTEGER NOT NULL,
+                reasons_json TEXT NOT NULL DEFAULT '[]',
+                note TEXT NOT NULL DEFAULT '',
+                status TEXT NOT NULL CHECK (status IN ('queued', 'dispatched', 'failed', 'skipped')),
+                error TEXT,
+                created_at TEXT NOT NULL,
+                dispatched_at TEXT
+            );
+
+            CREATE TABLE IF NOT EXISTS push_subscriptions (
+                id TEXT PRIMARY KEY,
+                endpoint TEXT NOT NULL UNIQUE,
+                subscription_json TEXT NOT NULL,
+                user_agent TEXT NOT NULL DEFAULT '',
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                last_error TEXT,
+                disabled_at TEXT
+            );
+
+            CREATE TABLE IF NOT EXISTS notification_dedupe (
+                key TEXT PRIMARY KEY,
+                event_kind TEXT NOT NULL,
+                job_id TEXT,
+                created_at TEXT NOT NULL
+            );
             """
         )
         _ensure_column(db, "jobs", "source_name", "TEXT")
@@ -258,6 +330,11 @@ def init_db(path: str | Path | None = None) -> None:
         _ensure_column(db, "discovery_runs", "jobs_added", "INTEGER NOT NULL DEFAULT 0")
         _ensure_column(db, "discovery_runs", "jobs_evaluated", "INTEGER NOT NULL DEFAULT 0")
         _ensure_column(db, "discovery_runs", "packs_prepared", "INTEGER NOT NULL DEFAULT 0")
+        _ensure_column(db, "discovery_runs", "paused_for_review", "INTEGER NOT NULL DEFAULT 0")
+        _ensure_column(db, "discovery_runs", "paused_reason", "TEXT")
+        _ensure_column(db, "discovery_config", "review_threshold", "INTEGER NOT NULL DEFAULT 3")
+        _ensure_column(db, "discovery_config", "paused_for_review", "INTEGER NOT NULL DEFAULT 0")
+        _ensure_column(db, "discovery_config", "paused_reason", "TEXT")
         _ensure_column(db, "application_packs", "version", "INTEGER NOT NULL DEFAULT 1")
         _ensure_column(db, "application_packs", "revision_state", "TEXT NOT NULL DEFAULT 'current'")
         _ensure_column(db, "application_packs", "revision_reasons_json", "TEXT NOT NULL DEFAULT '[]'")

@@ -788,6 +788,113 @@ textarea {
   font-weight: 800;
 }
 
+.notification-card,
+.application-task-panel {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 10px;
+  padding: 11px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--paper);
+}
+
+.notification-card.compact {
+  margin-bottom: 12px;
+}
+
+.notification-card > div:nth-child(2),
+.application-task-panel {
+  min-width: 0;
+}
+
+.notification-card b,
+.application-task-panel b {
+  display: block;
+  color: var(--ink);
+  font-size: 11px;
+  line-height: 14px;
+}
+
+.notification-card small,
+.notification-card em {
+  display: block;
+  margin-top: 2px;
+  color: var(--muted);
+  font-size: 9px;
+  line-height: 13px;
+  font-style: normal;
+}
+
+.notification-actions {
+  display: flex;
+  gap: 6px;
+}
+
+.notification-actions button {
+  min-height: 32px;
+  padding: 0 10px;
+  border: 0;
+  border-radius: 999px;
+  background: var(--ink);
+  color: white;
+  font-size: 8px;
+  font-weight: 900;
+}
+
+.notification-actions button:disabled {
+  opacity: 0.55;
+}
+
+.application-task-panel {
+  grid-template-columns: 1fr;
+  padding: 0;
+  overflow: hidden;
+  background: var(--paper);
+}
+
+.application-task-panel .pack-header {
+  background: var(--ink);
+  color: white;
+}
+
+.application-task-panel .pack-header span {
+  background: var(--orange);
+}
+
+.task-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 7px;
+  padding: 12px 14px;
+  border-top: 1px solid var(--line);
+}
+
+.task-list b {
+  flex-basis: 100%;
+  font-size: 9px;
+}
+
+.task-list span {
+  padding: 5px 7px;
+  border-radius: 4px;
+  background: var(--orange-soft);
+  color: var(--ink);
+  font-size: 10px;
+  font-weight: 800;
+}
+
+.task-report {
+  margin: 0;
+  padding: 12px 14px 14px;
+  border-top: 1px solid var(--line);
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 17px;
+  white-space: pre-wrap;
+}
+
 .pack-version-history {
   display: flex;
   align-items: center;
@@ -1927,6 +2034,13 @@ textarea {
   display: flex;
   align-items: center;
   gap: 7px;
+}
+
+.discovery-status.warning,
+.operation-message.warning {
+  border-color: #c98829;
+  background: #fff6dd;
+  color: #6e4910;
 }
 
 .reference-card {
