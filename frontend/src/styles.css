@@ -459,11 +459,12 @@ textarea {
 }
 
 .featured-title {
-  max-width: 280px;
+  max-width: 100%;
   font-size: 27px;
   line-height: 26px;
   font-weight: 800;
-  overflow-wrap: anywhere;
+  overflow-wrap: break-word;
+  word-break: normal;
 }
 
 .tag-row {
@@ -2535,8 +2536,16 @@ button.activity-item:hover {
     width: 100%;
     height: 100%;
     min-height: 0;
-    overflow: hidden;
     background: var(--paper);
+  }
+
+  html {
+    overflow: hidden;
+  }
+
+  body,
+  #root {
+    overflow: visible;
   }
 
   body {
@@ -2545,7 +2554,11 @@ button.activity-item:hover {
   }
 
   .app-shell {
-    --mobile-dock-clearance: calc(98px + max(24px, env(safe-area-inset-bottom)));
+    --standalone-viewport-bottom-offset: 0px;
+    --mobile-dock-clearance: max(
+      74px,
+      calc(98px + max(24px, env(safe-area-inset-bottom)) - var(--standalone-viewport-bottom-offset))
+    );
     position: fixed;
     inset: 0;
     height: auto;
@@ -2553,6 +2566,11 @@ button.activity-item:hover {
     overflow: hidden;
     padding-top: max(0px, env(safe-area-inset-top));
     background: var(--warm);
+  }
+
+  html.is-standalone .app-shell {
+    --standalone-viewport-bottom-offset: env(safe-area-inset-top);
+    bottom: calc(0px - var(--standalone-viewport-bottom-offset));
   }
 
   .desktop-rail {
@@ -2599,12 +2617,16 @@ button.activity-item:hover {
   }
 
   .review-body {
-    padding-bottom: calc(86px + env(safe-area-inset-bottom));
+    padding-bottom: max(
+      60px,
+      calc(86px + env(safe-area-inset-bottom) - var(--standalone-viewport-bottom-offset))
+    );
   }
 
   .review-actions {
     position: fixed;
     inset: auto auto 0 50%;
+    bottom: calc(0px - var(--standalone-viewport-bottom-offset));
     z-index: 24;
     width: 100%;
     transform: translateX(-50%);
@@ -2617,7 +2639,7 @@ button.activity-item:hover {
   }
 
   .mobile-dock {
-    position: fixed;
+    position: absolute;
     inset: auto 0 0;
     z-index: 20;
     display: block;
@@ -2646,7 +2668,10 @@ button.activity-item:hover {
 
   .preferences-screen .sticky-submit {
     position: sticky;
-    bottom: calc(66px + max(24px, env(safe-area-inset-bottom)));
+    bottom: max(
+      74px,
+      calc(66px + max(24px, env(safe-area-inset-bottom)) - var(--standalone-viewport-bottom-offset))
+    );
     z-index: 19;
   }
 
