@@ -2543,6 +2543,10 @@ button.activity-item:hover {
     overflow: hidden;
   }
 
+  html.is-standalone {
+    overflow: visible;
+  }
+
   body,
   #root {
     overflow: visible;
