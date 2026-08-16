@@ -27,6 +27,7 @@ import {
   Target,
   Trash2,
   Unplug,
+  Upload,
   UserRound,
   X
 } from "lucide-react";
@@ -156,6 +157,7 @@ type JobDetail = JobListItem & {
 };
 
 type Preferences = {
+  profile_summary: string;
   target_locations: string[];
   work_modes: string[];
   min_home_office_days?: number | null;
@@ -238,6 +240,14 @@ type DiscoveryOperations = {
   recent_runs: DiscoveryRunSummary[];
 };
 
+type ProfileDocument = {
+  id: string;
+  name: string;
+  media_type: string;
+  size: number;
+  created_at: string;
+};
+
 type PushStatus = {
   supported: boolean;
   public_key: string;
@@ -288,6 +298,7 @@ function App() {
   const [pulse, setPulse] = React.useState<DashboardPulse>({ days: [], today_count: 0 });
   const [discoveryOperations, setDiscoveryOperations] = React.useState<DiscoveryOperations | null>(null);
   const [reactiveResume, setReactiveResume] = React.useState<ReactiveResumeStatus | null>(null);
+  const [profileDocuments, setProfileDocuments] = React.useState<ProfileDocument[]>([]);
   const [notificationStatus, setNotificationStatus] = React.useState<PushStatus | null>(null);
   const [notificationBusy, setNotificationBusy] = React.useState(false);
   const [notificationMessage, setNotificationMessage] = React.useState<string | null>(null);
@@ -317,6 +328,7 @@ function App() {
       setPulse({ days: [], today_count: 0 });
       setDiscoveryOperations(null);
       setReactiveResume(null);
+      setProfileDocuments([]);
       setNotificationStatus(null);
       setNotificationMessage(null);
       setError(null);
@@ -413,12 +425,14 @@ function App() {
         api<Preferences>("/api/preferences"),
         api<DiscoveryOperations>("/api/discovery/operations"),
         api<ReactiveResumeStatus>("/api/integrations/reactive-resume"),
-        api<PushStatus>("/api/notifications/status")
-      ]).then(([nextPreferences, operations, resumeStatus, pushStatus]) => {
+        api<PushStatus>("/api/notifications/status"),
+        api<ProfileDocument[]>("/api/profile/documents")
+      ]).then(([nextPreferences, operations, resumeStatus, pushStatus, documents]) => {
         setPreferences(nextPreferences);
         setDiscoveryOperations(operations);
         setReactiveResume(resumeStatus);
         setNotificationStatus(pushStatus);
+        setProfileDocuments(documents);
       }).catch((reason: unknown) => {
         if (!handleAuthExpired(reason)) setError(messageFrom(reason));
       });
@@ -480,7 +494,7 @@ function App() {
         ? "Moved to Passed. Your decline decision is saved."
         : decision === "request_changes"
           ? "Moved to Review. Luna revision is queued for a new pack version."
-          : "Application preparation queued. No employer contact or final submission is authorized.";
+          : "Application pack approved. Nothing was sent or uploaded.";
       setActionNotice({ jobId: actedJobId, text });
       if (decision === "request_changes") {
         setJobs((current) => current.filter((job) => job.id !== actedJobId));
@@ -669,6 +683,35 @@ function App() {
     }
   }
 
+  async function uploadProfileDocument(file: File): Promise<void> {
+    if (file.size > 20 * 1024 * 1024) throw new Error("Files may be at most 20 MB.");
+    const response = await fetch(`/api/profile/documents?name=${encodeURIComponent(file.name)}`, {
+      method: "POST",
+      credentials: "same-origin",
+      headers: { "Content-Type": file.type || "application/octet-stream" },
+      body: file
+    });
+    if (!response.ok) {
+      const detail = await errorDetail(response);
+      if (response.status === 401) throw new AuthExpiredError(detail);
+      throw new Error(detail);
+    }
+    setProfileDocuments(await api<ProfileDocument[]>("/api/profile/documents"));
+  }
+
+  async function deleteProfileDocument(documentId: string): Promise<void> {
+    const response = await fetch(`/api/profile/documents/${documentId}`, {
+      method: "DELETE",
+      credentials: "same-origin"
+    });
+    if (!response.ok) {
+      const detail = await errorDetail(response);
+      if (response.status === 401) throw new AuthExpiredError(detail);
+      throw new Error(detail);
+    }
+    setProfileDocuments((current) => current.filter((document) => document.id !== documentId));
+  }
+
   async function updateReactiveResume(path: string, method: "POST" | "PUT" | "DELETE", payload?: unknown) {
     try {
       const options: RequestInit = { method };
@@ -710,6 +753,7 @@ function App() {
       setPulse({ days: [], today_count: 0 });
       setDiscoveryOperations(null);
       setReactiveResume(null);
+      setProfileDocuments([]);
       setNotificationStatus(null);
       setNotificationMessage(null);
       setMobileDetailOpen(false);
@@ -758,7 +802,7 @@ function App() {
         onBack={() => setMobileDetailOpen(false)}
         onDecline={() => setFeedbackMode("decline")}
         onRevise={() => setFeedbackMode("revise")}
-        onApprove={() => void submitReviewDecision("approve", ["Application preparation queued"], "")}
+        onApprove={() => void submitReviewDecision("approve", ["Application pack approved"], "")}
         onRegenerate={() => void regeneratePack()}
         onEnableNotifications={() => void enableNotifications()}
         onDisableNotifications={() => void disableNotifications()}
@@ -801,6 +845,7 @@ function App() {
       discoveryMessage={discoveryMessage}
       discoveryError={discoveryError}
       reactiveResume={reactiveResume}
+      profileDocuments={profileDocuments}
       notificationStatus={notificationStatus}
       notificationBusy={notificationBusy}
       notificationMessage={notificationMessage}
@@ -821,6 +866,8 @@ function App() {
         { resume_id: resumeId }
       )}
       onDisconnectReactiveResume={() => updateReactiveResume("/api/integrations/reactive-resume", "DELETE")}
+      onUploadProfileDocument={uploadProfileDocument}
+      onDeleteProfileDocument={deleteProfileDocument}
       onSave={savePreferences}
     />
   ) : (
@@ -1045,14 +1092,13 @@ function JobReview({
   onTestNotification: () => void;
 }) {
   const pack = job.application_pack;
-  const task = job.application_task;
   const statusCopy = actionNotice || (
     job.status === "bad"
       ? "Passed. Your decline decision is saved."
       : job.status === "maybe"
         ? "Changes requested. Luna revision is queued for a new pack version."
         : job.status === "good"
-          ? "Application preparation queued. No employer contact or final submission is authorized."
+          ? "Application pack approved. Nothing was sent or uploaded."
           : null
   );
   return (
@@ -1147,8 +1193,6 @@ function JobReview({
           ) : null}
         </section>
 
-        {task ? <ApplicationTaskPanel task={task} /> : null}
-
         <div className="spec-strip">
           <Spec label="Salary" value={formatSalary(job)} />
           <Spec label="Type" value={(job.work_mode || "Unknown").toUpperCase()} />
@@ -1171,7 +1215,7 @@ function JobReview({
           REQUEST CHANGES
         </button>
         <button className="approve-action" type="button" onClick={onApprove} disabled={saving || pack?.status !== "ready"}>
-          {saving ? "SAVING…" : "APPROVE + QUEUE PREP"} <ArrowRight size={16} />
+          {saving ? "SAVING…" : "APPROVE PACK"} <ArrowRight size={16} />
         </button>
       </footer>
     </article>
@@ -1295,7 +1339,7 @@ function NotificationControl({
         <small>
           {enabled
             ? `${status?.subscription_count ?? 0} active browser subscription${status?.subscription_count === 1 ? "" : "s"}`
-            : browserReady ? "Get alerts for ready packs, paused discovery, reminders, and application task updates." : "This browser cannot receive Web Push notifications."}
+            : browserReady ? "Get alerts for ready packs, paused discovery, and review reminders." : "This browser cannot receive Web Push notifications."}
         </small>
         {message ? <em>{message}</em> : null}
       </div>
@@ -1426,6 +1470,7 @@ function PreferencesView({
   discoveryMessage,
   discoveryError,
   reactiveResume,
+  profileDocuments,
   notificationStatus,
   notificationBusy,
   notificationMessage,
@@ -1438,6 +1483,8 @@ function PreferencesView({
   onRefreshReactiveResume,
   onSelectReactiveResume,
   onDisconnectReactiveResume,
+  onUploadProfileDocument,
+  onDeleteProfileDocument,
   onSave
 }: {
   preferences: Preferences;
@@ -1446,6 +1493,7 @@ function PreferencesView({
   discoveryMessage: string | null;
   discoveryError: string | null;
   reactiveResume: ReactiveResumeStatus | null;
+  profileDocuments: ProfileDocument[];
   notificationStatus: PushStatus | null;
   notificationBusy: boolean;
   notificationMessage: string | null;
@@ -1458,6 +1506,8 @@ function PreferencesView({
   onRefreshReactiveResume: () => Promise<ReactiveResumeStatus>;
   onSelectReactiveResume: (resumeId: string) => Promise<ReactiveResumeStatus>;
   onDisconnectReactiveResume: () => Promise<ReactiveResumeStatus>;
+  onUploadProfileDocument: (file: File) => Promise<void>;
+  onDeleteProfileDocument: (documentId: string) => Promise<void>;
   onSave: (next: Preferences) => Promise<Preferences>;
 }) {
   const initial = normalizeEditablePreferences(preferences);
@@ -1480,8 +1530,7 @@ function PreferencesView({
     setDraft({ ...draft, work_modes: nextModes });
   }
 
-  const salaryMin = boundedNumber(String(draft.salary_target_min ?? 50000), 30000, 120000, 50000);
-  const salaryMax = boundedNumber(String(draft.salary_target_max ?? 56000), 30000, 120000, 56000);
+  const salaryMin = boundedNumber(String(draft.salary_target_min ?? 0), 0, 200000, 0);
   const isDirty = preferenceFingerprint(draft) !== preferenceFingerprint(baseline);
 
   async function save() {
@@ -1503,14 +1552,14 @@ function PreferencesView({
       <header className="pref-hero">
         <div className="hero-top">
           <div>
-            <p className="micro orange-text">SEARCH DNA</p>
-            <h1>Search profile</h1>
+            <p className="micro orange-text">YOUR JOBFLOW PROFILE</p>
+            <h1>Me</h1>
           </div>
           <span className="round-action">
             <BrainCircuit size={20} />
           </span>
         </div>
-        <p>Saved salary, location, commute, language, and seniority gates control which packs can reach Inbox.</p>
+        <p>Edit what Scout and Writer know about you, what jobs should be found, and which supporting documents are available.</p>
         <div className="quality-row factual">
           <span><i style={{ width: `${Math.min(100, Math.max(18, draft.role_families.length * 12))}%` }} /></span>
           <b>{draft.role_families.length} ROLE TAGS</b>
@@ -1518,66 +1567,40 @@ function PreferencesView({
       </header>
 
       <div className="screen-body preferences-body">
-        <section className="salary-card">
+        <section className="pref-section agent-knowledge">
+          <div className="section-head">
+            <h2>What JobFlow knows about me</h2>
+            <span>EDITABLE</span>
+          </div>
+          <p className="priority-help">This is the personal and professional context Scout and Writer receive. Edit it directly when something changes.</p>
+          <textarea
+            className="profile-summary"
+            aria-label="Information JobFlow knows about me"
+            rows={9}
+            placeholder="Add your experience, strengths, education, target direction, and anything the job agents should know…"
+            value={draft.profile_summary}
+            onChange={(event) => setDraft({ ...draft, profile_summary: event.target.value })}
+          />
+        </section>
+
+        <section className="salary-card salary-single">
           <div>
-            <span className="micro">TARGET RANGE</span>
-            <strong>{formatCurrencyValue(salaryMin, draft.salary_currency)}–{formatCurrencyValue(salaryMax, draft.salary_currency)}</strong>
+            <span className="micro">MINIMUM GROSS SALARY / YEAR</span>
+            <strong>{salaryMin === 0 ? "NO MINIMUM" : formatCurrencyValue(salaryMin, draft.salary_currency)}</strong>
           </div>
-          <span className="micro">GROSS / YEAR</span>
-          <div className="salary-track">
-            <span className="salary-rail" />
-            <span
-              className="salary-fill"
-              style={{ left: `${salaryPercent(salaryMin)}%`, right: `${100 - salaryPercent(salaryMax)}%` }}
-            />
-            <input
-              className="salary-range salary-range-min"
-              aria-label="Target minimum salary"
-              type="range"
-              min={30000}
-              max={120000}
-              step={1000}
-              value={salaryMin}
-              onChange={(event) => {
-                const nextMin = Math.min(Number(event.target.value), salaryMax);
-                setDraft({ ...draft, salary_target_min: nextMin, acceptable_salary_min: nextMin });
-              }}
-            />
-            <input
-              className="salary-range salary-range-max"
-              aria-label="Target maximum salary"
-              type="range"
-              min={30000}
-              max={120000}
-              step={1000}
-              value={salaryMax}
-              onChange={(event) => setDraft({ ...draft, salary_target_max: Math.max(Number(event.target.value), salaryMin) })}
-            />
-          </div>
-          <div className="salary-inputs">
-            <input
-              aria-label="Target minimum salary"
-              type="number"
-              min={30000}
-              max={salaryMax}
-              step={1000}
-              value={salaryMin}
-              onChange={(event) => {
-                const nextMin = Math.min(boundedNumber(event.target.value, 30000, 120000, salaryMin), salaryMax);
-                setDraft({ ...draft, salary_target_min: nextMin, acceptable_salary_min: nextMin });
-              }}
-            />
-            <input
-              aria-label="Target maximum salary"
-              type="number"
-              min={salaryMin}
-              max={120000}
-              step={1000}
-              value={salaryMax}
-              onChange={(event) => setDraft({ ...draft, salary_target_max: Math.max(boundedNumber(event.target.value, 30000, 120000, salaryMax), salaryMin) })}
-            />
-          </div>
-          <p className="salary-note">The target minimum is also the hard salary gate used before pack preparation.</p>
+          <input
+            aria-label="Minimum gross annual salary; zero means no minimum"
+            type="number"
+            min={0}
+            max={200000}
+            step={1000}
+            value={salaryMin}
+            onChange={(event) => {
+              const nextMin = boundedNumber(event.target.value, 0, 200000, 0);
+              setDraft({ ...draft, salary_target_min: nextMin, salary_target_max: null, acceptable_salary_min: nextMin });
+            }}
+          />
+          <p className="salary-note">Set this to 0 when salary should not filter jobs. There is no separate toggle.</p>
         </section>
 
         <section className="pref-section">
@@ -1591,34 +1614,16 @@ function PreferencesView({
             ))}
           </div>
           <label className="inline-field">
-            <span>HOME-OFFICE DAYS</span>
+            <span>MINIMUM HOME-OFFICE DAYS <small>0 = no minimum</small></span>
             <input
+              aria-label="Minimum home-office days per week; zero means no minimum"
               type="number"
               min={0}
               max={7}
-              value={draft.min_home_office_days ?? ""}
-              onChange={(event) => setDraft({ ...draft, min_home_office_days: numberOrNull(event.target.value) })}
+              value={draft.min_home_office_days ?? 0}
+              onChange={(event) => setDraft({ ...draft, min_home_office_days: boundedNumber(event.target.value, 0, 7, 0) })}
             />
           </label>
-        </section>
-
-        <section className="pref-section rules-section">
-          <h2>Hard rules</h2>
-          {[
-            ["Location", draft.target_locations.length ? draft.target_locations.join(", ") : "Wien default"],
-            ["Salary", `${formatCurrencyValue(salaryMin, draft.salary_currency)} minimum`],
-            ["Work setup", draft.work_modes.length ? draft.work_modes.join(", ") : "No commute gate saved"],
-            ["Home office", draft.min_home_office_days == null ? "No minimum saved" : `${draft.min_home_office_days}+ days`],
-            ["Seniority", "Senior, lead, manager, principal roles are blocked"]
-          ].map(([label, value]) => (
-            <div className="rule-row readonly" key={label}>
-              <span>
-                <b>{label}</b>
-                <small>{value}</small>
-              </span>
-              <i className="on"><b /></i>
-            </div>
-          ))}
         </section>
 
         <TagEditor
@@ -1637,12 +1642,16 @@ function PreferencesView({
             priority_role_families: draft.priority_role_families.filter((priority) => role_families.some((role) => role.toLocaleLowerCase() === priority.toLocaleLowerCase()))
           })}
         />
-        <TagEditor
-          label="Custom search phrases"
-          placeholder="Optional exact search phrase…"
-          values={draft.discovery_queries}
-          onChange={(discovery_queries) => setDraft({ ...draft, discovery_queries })}
-        />
+        <section className="pref-section">
+          <h2>Search phrases</h2>
+          <p className="priority-help">JobFlow automatically builds search phrases from your priority roles and locations. Add entries here only when you want an exact extra phrase searched.</p>
+          <TagEditor
+            label="Optional extra phrases"
+            placeholder="Add an exact phrase…"
+            values={draft.discovery_queries}
+            onChange={(discovery_queries) => setDraft({ ...draft, discovery_queries })}
+          />
+        </section>
 
         <section className="pref-section">
           <div className="section-head">
@@ -1698,11 +1707,17 @@ function PreferencesView({
           <div className="approval-boundary">
             <span className="company-mark dark"><LockKeyhole size={14} /></span>
             <span>
-              <b>Applying requires your approval</b>
-              <small>Approval queues application preparation only. JobFlow does not submit, contact employers, or authorize final submission.</small>
+              <b>Pack approval is only a review decision</b>
+              <small>Approving confirms that the finished CV and letter look correct. JobFlow does not queue more preparation, submit anything, upload files, or contact the employer.</small>
             </span>
           </div>
         </section>
+
+        <SupportingDocumentsPanel
+          documents={profileDocuments}
+          onUpload={onUploadProfileDocument}
+          onDelete={onDeleteProfileDocument}
+        />
 
         <ReactiveResumePanel
           status={reactiveResume}
@@ -1723,11 +1738,6 @@ function PreferencesView({
             onTest={onTestNotification}
           />
         </section>
-
-        <div className="learning-note">
-          <span className="company-mark dark"><BrainCircuit size={14} /></span>
-          <b>Review decisions are stored per pack version; feedback remains available for older clients.</b>
-        </div>
       </div>
 
       {isDirty ? (
@@ -1748,6 +1758,88 @@ function PreferencesView({
         </footer>
       ) : null}
     </article>
+  );
+}
+
+function SupportingDocumentsPanel({
+  documents,
+  onUpload,
+  onDelete
+}: {
+  documents: ProfileDocument[];
+  onUpload: (file: File) => Promise<void>;
+  onDelete: (documentId: string) => Promise<void>;
+}) {
+  const inputRef = React.useRef<HTMLInputElement | null>(null);
+  const [busy, setBusy] = React.useState(false);
+  const [panelError, setPanelError] = React.useState<string | null>(null);
+
+  async function upload(file: File | undefined) {
+    if (!file) return;
+    setBusy(true);
+    setPanelError(null);
+    try {
+      await onUpload(file);
+      if (inputRef.current) inputRef.current.value = "";
+    } catch (reason) {
+      setPanelError(messageFrom(reason));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function remove(document: ProfileDocument) {
+    if (!window.confirm(`Remove ${document.name} from JobFlow?`)) return;
+    setBusy(true);
+    setPanelError(null);
+    try {
+      await onDelete(document.id);
+    } catch (reason) {
+      setPanelError(messageFrom(reason));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <section className="pref-section supporting-documents" id="supporting-documents">
+      <div className="section-head">
+        <div>
+          <h2>Supporting documents</h2>
+          <p className="priority-help">Upload your Matura certificate, references, certificates, or other files the application agent may need.</p>
+        </div>
+        <button className="document-upload" type="button" disabled={busy} onClick={() => inputRef.current?.click()}>
+          <Upload size={14} /> {busy ? "WORKING…" : "UPLOAD"}
+        </button>
+        <input
+          ref={inputRef}
+          className="visually-hidden"
+          type="file"
+          accept=".pdf,.png,.jpg,.jpeg,.webp,.doc,.docx,image/*"
+          onChange={(event) => void upload(event.target.files?.[0])}
+        />
+      </div>
+      <small className="document-help">PDF, image, DOC, or DOCX · maximum 20 MB per file</small>
+      {panelError ? <p className="operation-message error">{panelError}</p> : null}
+      {documents.length === 0 ? (
+        <p className="documents-empty">No supporting documents uploaded yet.</p>
+      ) : (
+        <div className="document-list">
+          {documents.map((document) => (
+            <div className="document-row" key={document.id}>
+              <span className="company-mark dark"><FileText size={14} /></span>
+              <a href={`/api/profile/documents/${document.id}`} target="_blank" rel="noreferrer">
+                <b>{document.name}</b>
+                <small>{formatFileSize(document.size)} · added {formatFoundDate(document.created_at, true)}</small>
+              </a>
+              <button type="button" disabled={busy} aria-label={`Remove ${document.name}`} onClick={() => void remove(document)}>
+                <Trash2 size={15} />
+              </button>
+            </div>
+          ))}
+        </div>
+      )}
+    </section>
   );
 }
 
@@ -2005,7 +2097,7 @@ function DiscoveryOperationsPanel({
       </div>
 
       <div className="operation-block query-preview">
-        <div className="operation-heading"><div><b>Search plan</b><small>Exact phrases used by Search Now and scheduled scans, generated from saved roles and locations.</small></div><em>{operations.generated_queries.length}</em></div>
+        <div className="operation-heading"><div><b>Phrases JobFlow will search</b><small>Generated from your saved priority roles and locations, plus any optional extra phrases above.</small></div><em>{operations.generated_queries.length}</em></div>
         {operations.generated_queries.slice(0, 4).map((query) => <span key={query}>{query}</span>)}
         {operations.generated_queries.length > 4 ? <small>+{operations.generated_queries.length - 4} more searches</small> : null}
       </div>
@@ -2495,6 +2587,12 @@ function collapseSystemActivities(items: ActivityItem[]) {
   return collapsed;
 }
 
+function formatFileSize(bytes: number) {
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${Math.round(bytes / 1024)} KB`;
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+}
+
 function formatDateTime(value: string) {
   return new Intl.DateTimeFormat(undefined, { month: "short", day: "2-digit", hour: "2-digit", minute: "2-digit" }).format(new Date(value)).toUpperCase();
 }
@@ -2580,10 +2678,13 @@ function humanizeRole(value: string) {
 }
 
 function normalizeEditablePreferences(preferences: Preferences): Preferences {
-  const targetMin = preferences.salary_target_min ?? preferences.acceptable_salary_min ?? null;
+  const targetMin = preferences.salary_target_min ?? preferences.acceptable_salary_min ?? 0;
   return {
     ...preferences,
+    profile_summary: preferences.profile_summary ?? "",
+    min_home_office_days: preferences.min_home_office_days ?? 0,
     salary_target_min: targetMin,
+    salary_target_max: null,
     acceptable_salary_min: targetMin,
     role_families: Array.from(new Set(preferences.role_families.map(humanizeRole).filter(Boolean))),
     priority_role_families: Array.from(new Set((preferences.priority_role_families ?? []).map(humanizeRole).filter(Boolean))),

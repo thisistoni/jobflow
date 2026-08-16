@@ -238,6 +238,7 @@ class JobAnalysisIn(BaseModel):
 
 
 class Preferences(BaseModel):
+    profile_summary: str = Field(default="", max_length=12000)
     target_locations: list[str] = Field(default_factory=list)
     work_modes: list[str] = Field(default_factory=list)
     min_home_office_days: int | None = Field(default=None, ge=0, le=7)
@@ -261,6 +262,14 @@ class Preferences(BaseModel):
         if not self.manual_submission_only:
             raise ValueError("JobFlow requires explicit approval before external applications")
         return self
+
+
+class ProfileDocumentOut(BaseModel):
+    id: str
+    name: str
+    media_type: str
+    size: int = Field(ge=0)
+    created_at: str
 
 
 class ActivityItem(BaseModel):

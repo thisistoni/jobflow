@@ -100,6 +100,7 @@ def init_db(path: str | Path | None = None) -> None:
 
             CREATE TABLE IF NOT EXISTS preferences (
                 id TEXT PRIMARY KEY CHECK (id = 'default'),
+                profile_summary TEXT NOT NULL DEFAULT '',
                 target_locations_json TEXT NOT NULL DEFAULT '[]',
                 work_modes_json TEXT NOT NULL DEFAULT '[]',
                 min_home_office_days INTEGER,
@@ -125,6 +126,15 @@ def init_db(path: str | Path | None = None) -> None:
                 title TEXT NOT NULL,
                 body TEXT NOT NULL DEFAULT '',
                 job_id TEXT REFERENCES jobs(id) ON DELETE SET NULL,
+                created_at TEXT NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS profile_documents (
+                id TEXT PRIMARY KEY,
+                original_name TEXT NOT NULL,
+                stored_name TEXT NOT NULL UNIQUE,
+                media_type TEXT NOT NULL,
+                size INTEGER NOT NULL CHECK (size >= 0),
                 created_at TEXT NOT NULL
             );
 
@@ -319,6 +329,7 @@ def init_db(path: str | Path | None = None) -> None:
             """
         )
         _ensure_column(db, "jobs", "source_name", "TEXT")
+        _ensure_column(db, "preferences", "profile_summary", "TEXT NOT NULL DEFAULT ''")
         _ensure_column(db, "jobs", "raw_description", "TEXT")
         _ensure_column(db, "jobs", "extracted_description", "TEXT")
         _ensure_column(db, "jobs", "salary_max_annual", "INTEGER")

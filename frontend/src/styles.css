@@ -1438,6 +1438,34 @@ textarea {
   line-height: 13px;
 }
 
+.salary-single {
+  align-items: end;
+}
+
+.salary-single > input {
+  width: 116px;
+  min-height: 44px;
+  border-color: var(--ink);
+  background: var(--paper);
+  font-size: 16px;
+  font-weight: 800;
+  text-align: right;
+}
+
+.profile-summary {
+  width: 100%;
+  min-height: 190px;
+  resize: vertical;
+  line-height: 1.5;
+}
+
+.agent-knowledge {
+  padding: 14px;
+  border: 1px solid var(--ink);
+  border-radius: 8px;
+  background: var(--paper);
+}
+
 .pref-section {
   display: grid;
   gap: 12px;
@@ -1472,6 +1500,16 @@ textarea {
 .inline-field {
   grid-template-columns: minmax(0, 1fr) 84px;
   align-items: center;
+}
+
+.inline-field > span small {
+  display: block;
+  margin-top: 3px;
+  color: var(--muted);
+  font-size: 8px;
+  font-weight: 600;
+  letter-spacing: 0;
+  text-transform: none;
 }
 
 .rule-row {
@@ -1921,6 +1959,107 @@ textarea {
 .run-state.succeeded { background: #2c7a4b; }
 .run-state.failed { background: #b93a23; }
 .run-state.running { background: var(--orange); }
+
+.supporting-documents {
+  padding: 14px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--paper);
+}
+
+.supporting-documents .section-head {
+  align-items: flex-start;
+}
+
+.supporting-documents .section-head > div {
+  min-width: 0;
+}
+
+.document-upload {
+  flex: 0 0 auto;
+  min-height: 34px;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 0 10px;
+  border: 0;
+  border-radius: 4px;
+  background: var(--ink);
+  color: white;
+  font-size: 9px;
+  font-weight: 800;
+}
+
+.document-help,
+.documents-empty {
+  color: var(--muted);
+  font-size: 9px;
+  line-height: 13px;
+}
+
+.document-list {
+  display: grid;
+  gap: 8px;
+}
+
+.document-row {
+  min-width: 0;
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 10px;
+  padding: 10px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: #f5f1eb;
+}
+
+.document-row a {
+  min-width: 0;
+  display: grid;
+  gap: 2px;
+  color: var(--ink);
+  text-decoration: none;
+}
+
+.document-row a b,
+.document-row a small {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.document-row a b {
+  font-size: 11px;
+}
+
+.document-row a small {
+  color: var(--muted);
+  font-size: 8px;
+}
+
+.document-row > button {
+  width: 32px;
+  height: 32px;
+  display: grid;
+  place-items: center;
+  border: 0;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--muted);
+}
+
+.visually-hidden {
+  position: absolute !important;
+  width: 1px !important;
+  height: 1px !important;
+  padding: 0 !important;
+  margin: -1px !important;
+  overflow: hidden !important;
+  clip: rect(0, 0, 0, 0) !important;
+  white-space: nowrap !important;
+  border: 0 !important;
+}
 
 .reactive-resume-panel {
   display: grid;

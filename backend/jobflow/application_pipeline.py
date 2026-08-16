@@ -103,7 +103,8 @@ def analyze_karriere_job(job: KarriereJobDetail, preferences: Preferences) -> Jo
     else:
         missing.append("Work model")
 
-    if preferences.min_home_office_days is not None:
+    min_home_office_days = preferences.min_home_office_days or 0
+    if min_home_office_days > 0:
         if job.home_office_days is None:
             if job.work_mode and "home" in job.work_mode.casefold():
                 evidence.setdefault("work_mode", []).append(EvidenceItem(origin="job detail", text=job.work_mode))
@@ -114,7 +115,7 @@ def analyze_karriere_job(job: KarriereJobDetail, preferences: Preferences) -> Jo
             else:
                 hard_gates.append("Home-office days do not satisfy the saved minimum.")
                 score -= 14
-        elif job.home_office_days < preferences.min_home_office_days:
+        elif job.home_office_days < min_home_office_days:
             hard_gates.append("Home-office days are below the saved minimum.")
             score -= 14
 

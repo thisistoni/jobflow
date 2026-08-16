@@ -1,5 +1,9 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512">
-  <rect width="512" height="512" rx="108" fill="#0A0A0A"/>
-  <circle cx="256" cy="256" r="162" fill="#FF5C00"/>
-  <path d="M166 309V164h94c54 0 88 29 88 74 0 45-34 74-88 74h-43v36h-51Zm51-77h39c25 0 39-11 39-31s-14-31-39-31h-39v62Z" fill="#FFFDFC"/>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" role="img" aria-labelledby="title desc">
+  <title id="title">JobFlow</title>
+  <desc id="desc">JobFlow JF monogram in cream and orange on a dark rounded square.</desc>
+  <rect width="512" height="512" rx="112" fill="#17130f"/>
+  <text x="70" y="342" fill="#fffaf4" font-family="DejaVu Sans, Arial, sans-serif" font-size="262" font-weight="800">J</text>
+  <text x="242" y="342" fill="#f47a36" font-family="DejaVu Sans, Arial, sans-serif" font-size="262" font-weight="800">F</text>
+  <path d="M108 398H364" fill="none" stroke="#f47a36" stroke-width="24" stroke-linecap="round"/>
+  <path d="m350 363 41 35-41 35" fill="none" stroke="#f47a36" stroke-width="24" stroke-linecap="round" stroke-linejoin="round"/>
 </svg>

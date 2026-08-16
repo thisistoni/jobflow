@@ -100,7 +100,7 @@ def test_pack_version_review_backlog_pauses_discovery_without_search_call(
 
     approved = client.post("/api/jobs/job-0/review-decision", json={"decision": "approve", "reasons": [], "note": ""})
     assert approved.status_code == 200
-    assert approved.json()["application_task"]["state"] == "not_started"
+    assert approved.json()["application_task"] is None
     assert client.get("/api/review/status").json()["backlog_count"] == 2
 
     calls: list[str] = []
@@ -111,7 +111,7 @@ def test_pack_version_review_backlog_pauses_discovery_without_search_call(
     assert calls == ["python vienna"]
 
 
-def test_agent_application_report_updates_task_and_detail(tmp_path: Path, monkeypatch: Any) -> None:
+def test_approval_does_not_create_or_queue_application_task(tmp_path: Path, monkeypatch: Any) -> None:
     db_path = tmp_path / "jobflow.sqlite3"
     monkeypatch.setenv("JOBFLOW_DB", str(db_path))
 
@@ -122,31 +122,16 @@ def test_agent_application_report_updates_task_and_detail(tmp_path: Path, monkey
     _ready_job(db_path, "job-1")
     client = TestClient(app)
     token = client.post("/api/agent-tokens", json={"label": "reporter"}).json()["token"]
-    assert client.post("/api/jobs/job-1/review-decision", json={"decision": "approve"}).status_code == 200
+    approved = client.post("/api/jobs/job-1/review-decision", json={"decision": "approve"})
+    assert approved.status_code == 200
+    assert approved.json()["application_task"] is None
 
     report = client.post(
         "/api/jobs/job-1/application-task/report",
         headers={"Authorization": f"Bearer {token}"},
-        json={
-            "state": "needs_input",
-            "required_fields": ["notice period", "salary expectation"],
-            "questions": ["Can Toni start in September?"],
-            "report": "Employer form requires fields that are not known yet.",
-        },
+        json={"state": "needs_input", "required_fields": ["salary expectation"]},
     )
-    assert report.status_code == 200
-    task = report.json()["application_task"]
-    assert task["state"] == "needs_input"
-    assert task["required_fields"] == ["notice period", "salary expectation"]
-    assert task["questions"] == ["Can Toni start in September?"]
-    assert "not known yet" in task["report"]
-
-    submitted = client.post(
-        "/api/jobs/job-1/application-task/report",
-        headers={"Authorization": f"Bearer {token}"},
-        json={"state": "submitted", "report": "I submitted it."},
-    )
-    assert submitted.status_code == 409
+    assert report.status_code == 409
 
 
 def test_application_report_requires_current_pack_approval(tmp_path: Path, monkeypatch: Any) -> None:
@@ -168,7 +153,7 @@ def test_application_report_requires_current_pack_approval(tmp_path: Path, monke
     assert report.status_code == 409
 
 
-def test_changing_approval_removes_unstarted_application_task(tmp_path: Path, monkeypatch: Any) -> None:
+def test_changing_pack_review_keeps_application_task_empty(tmp_path: Path, monkeypatch: Any) -> None:
     db_path = tmp_path / "jobflow.sqlite3"
     monkeypatch.setenv("JOBFLOW_DB", str(db_path))
 
@@ -180,7 +165,7 @@ def test_changing_approval_removes_unstarted_application_task(tmp_path: Path, mo
     client = TestClient(app)
     approved = client.post("/api/jobs/job-changed/review-decision", json={"decision": "approve"})
     assert approved.status_code == 200
-    assert approved.json()["application_task"] is not None
+    assert approved.json()["application_task"] is None
     declined = client.post("/api/jobs/job-changed/review-decision", json={"decision": "decline"})
     assert declined.status_code == 200
     assert declined.json()["application_task"] is None

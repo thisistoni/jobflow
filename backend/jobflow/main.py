@@ -24,7 +24,7 @@ from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import ec
 from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse, Response
+from fastapi.responses import FileResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 from pywebpush import WebPushException, webpush
@@ -78,6 +78,7 @@ from .models import (
     JobIngestIn,
     JobListItem,
     Preferences,
+    ProfileDocumentOut,
     PushStatusOut,
     PushSubscriptionIn,
     RegeneratePackIn,
@@ -111,6 +112,8 @@ AUTH_COOKIE_MAX_AGE_SECONDS = 7 * 24 * 60 * 60
 STATIC_DIR_ENV = "JOBFLOW_STATIC_DIR"
 REVISION_WEBHOOK_URL_ENV = "JOBFLOW_REVISION_WEBHOOK_URL"
 REVISION_WEBHOOK_SECRET_ENV = "JOBFLOW_REVISION_WEBHOOK_SECRET"
+PROFILE_DOCUMENT_MAX_BYTES = 20 * 1024 * 1024
+PROFILE_DOCUMENT_EXTENSIONS = {".pdf", ".png", ".jpg", ".jpeg", ".webp", ".doc", ".docx"}
 OPEN_AUTH_API_PATHS = {"/api/auth/status", "/api/auth/login", "/api/auth/logout"}
 _scheduler_heartbeat_at: datetime | None = None
 
@@ -781,9 +784,12 @@ def _apply_review_decision(
         )
 
         if payload.decision == "approve":
-            _upsert_application_task(db, job_id, int(pack["version"]), now)
-            activity_title = f"Approved pack for {row['company']}"
-            activity_body = f"{row['title']} · application preparation queued. No employer contact or final submission is authorized."
+            db.execute(
+                "DELETE FROM application_tasks WHERE job_id = ? AND pack_version = ? AND state != 'submitted'",
+                (job_id, pack["version"]),
+            )
+            activity_title = f"Approved application pack for {row['company']}"
+            activity_body = f"{row['title']} · CV and letter approved. Nothing was sent or uploaded."
         elif payload.decision == "request_changes":
             db.execute(
                 "DELETE FROM application_tasks WHERE job_id = ? AND pack_version = ? AND state != 'submitted'",
@@ -901,30 +907,6 @@ def _store_legacy_feedback_only(job_id: str, payload: FeedbackIn) -> FeedbackOut
             ),
         )
     return FeedbackOut(rating=payload.rating, reasons=reasons, note=note, updated_at=now)
-
-
-def _upsert_application_task(db: Any, job_id: str, pack_version: int, now: str) -> None:
-    existing = db.execute(
-        "SELECT id, created_at FROM application_tasks WHERE job_id = ? AND pack_version = ?",
-        (job_id, pack_version),
-    ).fetchone()
-    task_id = existing["id"] if existing else str(uuid.uuid4())
-    created_at = existing["created_at"] if existing else now
-    db.execute(
-        """
-        INSERT INTO application_tasks (
-            id, job_id, pack_version, state, required_fields_json, questions_json,
-            report, created_at, updated_at
-        ) VALUES (?, ?, ?, 'not_started', '[]', '[]', '', ?, ?)
-        ON CONFLICT(job_id, pack_version) DO UPDATE SET
-            state = CASE
-                WHEN application_tasks.state IN ('submitted', 'failed') THEN application_tasks.state
-                ELSE application_tasks.state
-            END,
-            updated_at = excluded.updated_at
-        """,
-        (task_id, job_id, pack_version, created_at, now),
-    )
 
 
 def _review_status() -> ReviewStatusOut:
@@ -1211,14 +1193,15 @@ def update_preferences(payload: Preferences) -> Preferences:
         db.execute(
             """
             INSERT INTO preferences (
-                id, target_locations_json, work_modes_json, min_home_office_days,
+                id, profile_summary, target_locations_json, work_modes_json, min_home_office_days,
                 salary_currency, salary_target_min, salary_target_max, acceptable_salary_min,
                 role_families_json, priority_role_families_json, priorities_json, hard_rules_json,
                 discovery_queries_json, discovery_limit_per_query,
                 language_preference, application_language, manual_submission_only, updated_at
             )
-            VALUES ('default', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES ('default', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(id) DO UPDATE SET
+                profile_summary = excluded.profile_summary,
                 target_locations_json = excluded.target_locations_json,
                 work_modes_json = excluded.work_modes_json,
                 min_home_office_days = excluded.min_home_office_days,
@@ -1238,13 +1221,14 @@ def update_preferences(payload: Preferences) -> Preferences:
                 updated_at = excluded.updated_at
             """,
             (
+                payload.profile_summary.strip(),
                 encode_json(payload.target_locations),
                 encode_json(payload.work_modes),
-                payload.min_home_office_days,
+                payload.min_home_office_days or 0,
                 payload.salary_currency,
-                payload.salary_target_min,
+                payload.salary_target_min or 0,
                 payload.salary_target_max,
-                payload.salary_target_min,
+                payload.salary_target_min or 0,
                 encode_json(payload.role_families),
                 encode_json(payload.priority_role_families),
                 encode_json(payload.priorities),
@@ -1264,8 +1248,115 @@ def update_preferences(payload: Preferences) -> Preferences:
             """,
             (str(uuid.uuid4()), now),
         )
-    result = payload.model_copy(update={"updated_at": now})
+    result = payload.model_copy(update={
+        "profile_summary": payload.profile_summary.strip(),
+        "min_home_office_days": payload.min_home_office_days or 0,
+        "salary_target_min": payload.salary_target_min or 0,
+        "acceptable_salary_min": payload.salary_target_min or 0,
+        "updated_at": now,
+    })
     return result
+
+
+@app.get("/api/profile/documents", response_model=list[ProfileDocumentOut])
+def list_profile_documents() -> list[ProfileDocumentOut]:
+    with connect() as db:
+        rows = db.execute(
+            "SELECT id, original_name, media_type, size, created_at FROM profile_documents ORDER BY created_at DESC, id DESC"
+        ).fetchall()
+    return [
+        ProfileDocumentOut(
+            id=row["id"],
+            name=row["original_name"],
+            media_type=row["media_type"],
+            size=row["size"],
+            created_at=row["created_at"],
+        )
+        for row in rows
+    ]
+
+
+@app.post("/api/profile/documents", response_model=ProfileDocumentOut, status_code=201)
+async def upload_profile_document(
+    request: Request,
+    name: str = Query(min_length=1, max_length=240),
+) -> ProfileDocumentOut:
+    safe_name = Path(name).name.strip()
+    suffix = Path(safe_name).suffix.lower()
+    if not safe_name or safe_name != name.strip() or suffix not in PROFILE_DOCUMENT_EXTENSIONS:
+        raise HTTPException(status_code=422, detail="Upload a PDF, image, DOC, or DOCX file with a valid filename")
+    content = await request.body()
+    if not content:
+        raise HTTPException(status_code=422, detail="The uploaded file is empty")
+    if len(content) > PROFILE_DOCUMENT_MAX_BYTES:
+        raise HTTPException(status_code=413, detail="Files may be at most 20 MB")
+
+    document_id = str(uuid.uuid4())
+    stored_name = f"{document_id}{suffix}"
+    directory = _profile_document_directory()
+    directory.mkdir(parents=True, exist_ok=True)
+    target = directory / stored_name
+    temporary = directory / f".{stored_name}.tmp"
+    try:
+        with temporary.open("xb") as handle:
+            handle.write(content)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, target)
+        now = utc_now()
+        media_type = (request.headers.get("content-type") or "application/octet-stream").split(";", 1)[0]
+        with connect() as db:
+            db.execute(
+                "INSERT INTO profile_documents (id, original_name, stored_name, media_type, size, created_at) VALUES (?, ?, ?, ?, ?, ?)",
+                (document_id, safe_name, stored_name, media_type, len(content), now),
+            )
+            db.execute(
+                "INSERT INTO activity (id, kind, title, body, created_at) VALUES (?, 'profile_document', 'Supporting document added', ?, ?)",
+                (str(uuid.uuid4()), safe_name, now),
+            )
+    except Exception:
+        temporary.unlink(missing_ok=True)
+        target.unlink(missing_ok=True)
+        raise
+    return ProfileDocumentOut(id=document_id, name=safe_name, media_type=media_type, size=len(content), created_at=now)
+
+
+@app.get("/api/profile/documents/{document_id}")
+def download_profile_document(document_id: str) -> FileResponse:
+    with connect() as db:
+        row = db.execute(
+            "SELECT original_name, stored_name, media_type FROM profile_documents WHERE id = ?",
+            (document_id,),
+        ).fetchone()
+    if row is None:
+        raise HTTPException(status_code=404, detail="Document not found")
+    path = _profile_document_directory() / row["stored_name"]
+    if not path.is_file():
+        raise HTTPException(status_code=404, detail="Stored document file is missing")
+    return FileResponse(path, media_type=row["media_type"], filename=row["original_name"])
+
+
+@app.delete("/api/profile/documents/{document_id}", status_code=204)
+def delete_profile_document(document_id: str) -> Response:
+    with connect() as db:
+        row = db.execute(
+            "SELECT original_name, stored_name FROM profile_documents WHERE id = ?",
+            (document_id,),
+        ).fetchone()
+        if row is None:
+            raise HTTPException(status_code=404, detail="Document not found")
+        path = _profile_document_directory() / row["stored_name"]
+        path.unlink(missing_ok=True)
+        db.execute("DELETE FROM profile_documents WHERE id = ?", (document_id,))
+        db.execute(
+            "INSERT INTO activity (id, kind, title, body, created_at) VALUES (?, 'profile_document', 'Supporting document removed', ?, ?)",
+            (str(uuid.uuid4()), row["original_name"], utc_now()),
+        )
+    return Response(status_code=204)
+
+
+def _profile_document_directory() -> Path:
+    return database_path().parent / "profile-documents"
 
 
 @app.post("/api/discovery/search", response_model=list[DiscoverySearchResult])
@@ -2741,14 +2832,15 @@ def _job_detail(row: Any) -> JobDetail:
 
 def _preferences_from_row(row: Any) -> Preferences:
     return Preferences(
+        profile_summary=row["profile_summary"] or "",
         target_locations=decode_json(row["target_locations_json"], []),
         work_modes=decode_json(row["work_modes_json"], []),
-        min_home_office_days=row["min_home_office_days"],
+        min_home_office_days=row["min_home_office_days"] or 0,
         salary_currency=row["salary_currency"],
-        salary_target_min=row["salary_target_min"],
+        salary_target_min=row["salary_target_min"] or 0,
         salary_target_max=row["salary_target_max"],
         # Salary target minimum is the sole public and scoring source of truth.
-        acceptable_salary_min=row["salary_target_min"],
+        acceptable_salary_min=row["salary_target_min"] or 0,
         role_families=decode_json(row["role_families_json"], []),
         priority_role_families=decode_json(row["priority_role_families_json"], []),
         priorities=decode_json(row["priorities_json"], []),
